@@ -15,3 +15,5 @@ After a GitHub release has been published, run this command on Linux to install 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/juanmmorel/xdm-companion/main/scripts/install.sh) --repo juanmmorel/xdm-companion
 ```
+
+This command requires Bash and a supported Linux distribution. It does not run in Windows PowerShell or Command Prompt: the release package and automatic browser integration are Linux-specific. Running it from WSL installs the service inside WSL; it does not install or connect the service to browsers running directly on Windows.
