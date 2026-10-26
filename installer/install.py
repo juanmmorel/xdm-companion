@@ -125,24 +125,36 @@ def main():
   print(f"[*] Carpeta de XDM detectada automáticamente: {xdm_config_dir}")
   os.makedirs(xdm_config_dir, exist_ok=True)
 
-  # 1. Crear entorno virtual interno y permanente en la carpeta de XDM para producción
+  # 1. Crear o reparar el entorno virtual permanente dentro de la carpeta de XDM.
   prod_venv_dir = os.path.join(xdm_config_dir, "venv")
-  
+
   if system == "Windows":
     python_env = os.path.join(prod_venv_dir, "Scripts", "python.exe")
-    pip_env = os.path.join(prod_venv_dir, "Scripts", "pip.exe")
   else:
     python_env = os.path.join(prod_venv_dir, "bin", "python")
-    pip_env = os.path.join(prod_venv_dir, "bin", "pip")
 
-  if not os.path.exists(prod_venv_dir):
+  if not os.path.isfile(python_env):
+    if os.path.exists(prod_venv_dir):
+      print("[!] Se encontró un entorno virtual incompleto; se va a reconstruir.")
+      shutil.rmtree(prod_venv_dir)
     print("[*] Creando entorno virtual de producción...")
     run_command([sys.executable, "-m", "venv", prod_venv_dir])
+  if not os.path.isfile(python_env):
+    raise SystemExit("[!] No se pudo crear el entorno virtual de XDM Companion.")
 
-  # 2. Instalar dependencias dentro del entorno de producción
+  # 2. Resolver pip desde el intérprete del entorno y evitar actualizar pip
+  # por separado en cada reinstalación.
   print("[*] Instalando dependencias en el entorno de producción...")
-  run_command([python_env, "-m", "pip", "install", "--upgrade", "pip"])
-  run_command([pip_env, "install", "-r", os.path.join(PROJECT_DIR, "requirements.txt")])
+  run_command([
+      python_env,
+      "-m",
+      "pip",
+      "install",
+      "--disable-pip-version-check",
+      "--no-input",
+      "-r",
+      os.path.join(PROJECT_DIR, "requirements.txt"),
+  ])
 
   # 3. Copiar el código fuente 'core' y 'domains.json' a la carpeta de XDM
   core_dst = os.path.join(xdm_config_dir, "core")
