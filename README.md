@@ -4,4 +4,14 @@ XDM Companion improves the XDM download workflow with a floating button on suppo
 
 Availability depends on the site, page, session, and formats made available by the site. XDM Companion does not download every video on YouTube or video on other sites. It does not bypass DRM or access controls; protected or unavailable streams cannot be downloaded.
 
-The XDM desktop application and the XDM Companion background service are required. XDM Companion is an independent project and is not affiliated XDM.
+The XDM desktop application and the XDM Companion background service are required. XDM Companion is an independent project and is not affiliated with Google, YouTube, Mozilla, or XDM.
+
+For browser detection and the floating button to work, users must also install the browser extension **XDM Companion Bridge** from the Chrome Web Store or Firefox Add-ons once it is approved and published. The Linux install script below installs only the background service; it does not install the browser extension or the XDM desktop application.
+
+## Install on Linux
+
+After a GitHub release has been published, run this command on Linux to install the background service:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/juanmmorel/xdm-companion/main/scripts/install.sh) --repo juanmmorel/xdm-companion
+```
