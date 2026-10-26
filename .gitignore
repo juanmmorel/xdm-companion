@@ -1,0 +1,30 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python virtual environments and local runtime state
+.venv/
+venv/
+installer/.installer_venv/
+pyvenv.cfg
+bin/
+include/
+lib/
+lib64
+share/
+
+# Generated files
+.pytest_cache/
+build/
+dist/
+*.log
+*.bck
+
+# Local secrets and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx

@@ -1,0 +1,105 @@
+{
+  "companion": {
+    "service_url": "http://127.0.0.1:21121",
+    "xdm_url": "http://127.0.0.1:8597"
+  },
+  "providers": [
+    {
+      "id": "youtube",
+      "display_name": "YouTube",
+      "domains": [
+        "youtube.com",
+        "youtube-nocookie.com",
+        "youtu.be"
+      ],
+      "browser": {
+        "adapter": "youtube",
+        "module": "youtube.js",
+        "page_events": ["yt-navigate-start", "yt-navigate-finish", "yt-page-data-updated"],
+        "cookie_queries": [
+          { "kind": "playback_host", "url": "https://www.youtube.com/" },
+          { "kind": "apex_host", "url": "https://youtube.com/" },
+          { "kind": "youtube_domain", "domain": "youtube.com" }
+        ],
+        "account_cookie_markers": {
+          "login_info": ["LOGIN_INFO"],
+          "sapisid": ["SAPISID"],
+          "secure_1papisid": ["__SECURE-1PAPISID"],
+          "secure_3papisid": ["__SECURE-3PAPISID"]
+        },
+        "account_cookie_groups": [
+          ["LOGIN_INFO"],
+          ["SAPISID", "__SECURE-1PAPISID", "__SECURE-3PAPISID"]
+        ],
+        "payload_keys": {
+          "browser_diagnostics": "browser_diagnostics",
+          "player_diagnostics": "youtube_player_diagnostics",
+          "audio_track": "audio_track",
+          "playback": "youtube_playback"
+        },
+        "player": {
+          "selectors": ["ytd-player", "#movie_player", "#shorts-player"],
+          "response_global": "ytInitialPlayerResponse",
+          "video_id_query": "v",
+          "short_link_domains": ["youtu.be"],
+          "video_path_prefixes": ["/shorts/", "/embed/", "/live/"],
+          "video_id_pattern": "[A-Za-z0-9_-]{11}"
+        }
+      },
+      "backend": {
+        "adapter": "youtube",
+        "extractor_key": "Youtube",
+        "max_page_url_length": 8192,
+        "verbose_diagnostics": true,
+        "check_authenticated_session": true,
+        "extractor_args": {
+          "youtube": {
+            "player_client": ["default", "web_safari"]
+          }
+        },
+        "playback_cookie_host": "www.youtube.com",
+        "manifest_host_suffixes": ["googlevideo.com"],
+        "manifest_max_bytes": 4194304,
+        "manifest_max_redirects": 6,
+        "manifest_proxy_ttl_seconds": 21600,
+        "manifest_proxy_limit": 64,
+        "membership_error_terms": [
+          "members-only", "members only", "channel members", "channel's members",
+          "join this channel", "membership"
+        ],
+        "authentication_error_terms": ["sign in to confirm", "not a bot"],
+        "log_markers": {
+          "playback_token": { "marker": "po token", "required_terms": ["not provided", "missing", "require", "required"] },
+          "drm_filtered": { "marker": "drm", "required_terms": ["skip", "protect", "unplayable"] },
+          "javascript_runtime": { "terms": ["javascript runtime", "yt-dlp-ejs"] }
+        },
+        "language_aliases": {
+          "eng": "en", "spa": "es", "fre": "fr", "fra": "fr",
+          "deu": "de", "ger": "de", "ita": "it", "por": "pt",
+          "jpn": "ja", "kor": "ko", "zho": "zh", "chi": "zh",
+          "rus": "ru", "ara": "ar", "hin": "hi"
+        }
+      }
+    },
+    {
+      "id": "yt-dlp",
+      "domains": [
+        "tiktok.com",
+        "instagram.com",
+        "facebook.com",
+        "fb.watch",
+        "x.com",
+        "twitter.com",
+        "vimeo.com",
+        "twitch.tv",
+        "dailymotion.com",
+        "reddit.com",
+        "soundcloud.com",
+        "bilibili.com",
+        "rumble.com"
+      ],
+      "browser": { "adapter": "" },
+      "backend": {}
+    }
+  ]
+}

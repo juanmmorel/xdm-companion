@@ -1,0 +1,48 @@
+name: Release XDM Companion
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Obtener el código
+        uses: actions/checkout@v4
+
+      - name: Preparar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Preparar Node para las pruebas del puente
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Instalar dependencias de verificación
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Ejecutar pruebas
+        run: |
+          bash -n scripts/install.sh scripts/package-release.sh
+          python -m pytest -q -p no:cacheprovider
+          node integration_tests/browser_bridge.test.js
+
+      - name: Crear el paquete reproducible de Linux
+        run: scripts/package-release.sh "$GITHUB_REF_NAME"
+
+      - name: Publicar la release y sus checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/release/$GITHUB_REF_NAME/xdm-companion-linux.tar.gz" \
+            "dist/release/$GITHUB_REF_NAME/xdm-companion-linux.tar.gz.sha256" \
+            --title "XDM Companion $GITHUB_REF_NAME" \
+            --generate-notes
