@@ -62,8 +62,8 @@ def test_build_extension_scopes_permissions_to_configured_sites(tmp_path):
   assert chrome["content_scripts"][0]["run_at"] == "document_start"
   assert chrome["content_scripts"][0]["all_frames"] is True
   assert chrome["content_scripts"][0]["js"] == ["site-config.js", "content.js"]
-  assert chrome["version"] == "1.1.18"
-  assert firefox["version"] == "1.1.18"
+  assert chrome["version"] == "1.1.19"
+  assert firefox["version"] == "1.1.19"
   assert chrome["manifest_version"] == 3
   assert firefox["manifest_version"] == 3
   assert chrome["permissions"] == ["cookies", "scripting"]
@@ -105,6 +105,48 @@ def test_firefox_xpi_packages_the_generated_manifest(tmp_path):
     assert "site-config.js" in archive.namelist()
     assert "icons/companion-128.png" in archive.namelist()
   assert not browser_bridge.contains_firefox_signature_metadata(xpi)
+
+
+def test_firefox_xpi_clamps_source_timestamps_before_zip_epoch(tmp_path):
+  source = tmp_path / "old-source"
+  shutil.copytree(browser_bridge.SOURCE_DIR, source)
+  for path in source.rglob("*"):
+    if path.is_file():
+      os.utime(path, (0, 0))
+
+  xpi = browser_bridge.create_firefox_xpi(
+      source,
+      browser_bridge.DOMAINS_FILE,
+      tmp_path / "old-source.xpi",
+  )
+
+  with zipfile.ZipFile(xpi) as archive:
+    assert "manifest.json" in archive.namelist()
+    assert all(
+        item.date_time >= (1980, 1, 1, 0, 0, 0)
+        for item in archive.infolist()
+    )
+
+
+def test_chrome_store_zip_clamps_source_timestamps_before_zip_epoch(tmp_path):
+  source = tmp_path / "old-source"
+  shutil.copytree(browser_bridge.SOURCE_DIR, source)
+  for path in source.rglob("*"):
+    if path.is_file():
+      os.utime(path, (0, 0))
+
+  store_zip = browser_bridge.create_chrome_store_zip(
+      source,
+      browser_bridge.DOMAINS_FILE,
+      tmp_path / "old-source-chrome.zip",
+  )
+
+  with zipfile.ZipFile(store_zip) as archive:
+    assert "manifest.json" in archive.namelist()
+    assert all(
+        item.date_time >= (1980, 1, 1, 0, 0, 0)
+        for item in archive.infolist()
+    )
 
 
 def test_provider_browser_adapter_module_is_loaded_from_catalog_configuration(tmp_path):

@@ -52,16 +52,16 @@ Sustituye `REPO` por el nombre que elegiste. Si Git te pide identificarte, confi
 
 ## 4. Publicar la primera versión
 
-Ahora ambos manifiestos tienen la versión `1.1.18`. El nombre del tag debe coincidir con esa versión para que el empaquetador lo acepte:
+Ahora ambos manifiestos tienen la versión `1.1.19`. El nombre del tag debe coincidir con esa versión para que el empaquetador lo acepte:
 
 ```bash
-git tag v1.1.18
-git push origin v1.1.18
+git tag v1.1.19
+git push origin v1.1.19
 ```
 
-El workflow **Release XDM Companion** ejecuta las verificaciones, genera el paquete Linux y crea una release pública con el archivo y su checksum. En GitHub, abre **Actions** y espera que termine correctamente; luego confirma en **Releases** que `v1.1.18` incluye `xdm-companion-linux.tar.gz` y `xdm-companion-linux.tar.gz.sha256`.
+El workflow **Release XDM Companion** ejecuta las verificaciones, genera el paquete Linux y crea una release pública con el archivo y su checksum. En GitHub, abre **Actions** y espera que termine correctamente; luego confirma en **Releases** que `v1.1.19` incluye `xdm-companion-linux.tar.gz` y `xdm-companion-linux.tar.gz.sha256`.
 
-Para futuras versiones, actualiza la versión en los manifiestos Chrome y Firefox al mismo valor, crea el tag correspondiente y súbelo. Por ejemplo, `v1.1.19` debe coincidir con `1.1.19` en ambos manifiestos.
+Para futuras versiones, actualiza la versión en los manifiestos Chrome y Firefox al mismo valor, crea el tag correspondiente y súbelo. Por ejemplo, `v1.1.20` debe coincidir con `1.1.20` en ambos manifiestos.
 
 ## 5. Instalar desde la release
 
@@ -71,10 +71,10 @@ Cuando la release esté publicada, ejecuta en Linux:
 bash <(curl -fsSL https://raw.githubusercontent.com/juanmmorel/REPO/main/scripts/install.sh) --repo juanmmorel/REPO
 ```
 
-Reemplaza `REPO` en los dos lugares. Este comando requiere Bash, conexión a GitHub y un repositorio público. El instalador obtiene la última release estable; para fijar una versión usa `--version v1.1.18`:
+Reemplaza `REPO` en los dos lugares. Este comando requiere Bash, conexión a GitHub y un repositorio público. El instalador obtiene la última release estable; para fijar una versión usa `--version v1.1.19`:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/juanmmorel/REPO/main/scripts/install.sh) --repo juanmmorel/REPO --version v1.1.18
+bash <(curl -fsSL https://raw.githubusercontent.com/juanmmorel/REPO/main/scripts/install.sh) --repo juanmmorel/REPO --version v1.1.19
 ```
 
 También puedes descargar y revisar el script antes de ejecutarlo:

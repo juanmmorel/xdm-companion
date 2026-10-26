@@ -97,7 +97,12 @@ def create_firefox_xpi(source_dir, domains_file, xpi_path):
     shutil.rmtree(stage)
   build_extension(source_dir, domains_file, stage, "firefox")
   try:
-    with zipfile.ZipFile(xpi_path, "w", zipfile.ZIP_DEFLATED) as archive:
+    with zipfile.ZipFile(
+        xpi_path,
+        "w",
+        zipfile.ZIP_DEFLATED,
+        strict_timestamps=False,
+    ) as archive:
       for path in sorted(stage.rglob("*")):
         if path.is_file():
           archive.write(path, path.relative_to(stage).as_posix())
@@ -113,7 +118,12 @@ def create_chrome_store_zip(source_dir, domains_file, zip_path):
   with tempfile.TemporaryDirectory(prefix="xdm-companion-chrome-store-") as temporary_dir:
     stage = Path(temporary_dir) / "extension"
     build_extension(source_dir, domains_file, stage, "chrome")
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
+    with zipfile.ZipFile(
+        zip_path,
+        "w",
+        zipfile.ZIP_DEFLATED,
+        strict_timestamps=False,
+    ) as archive:
       for path in sorted(stage.rglob("*")):
         if path.is_file():
           archive.write(path, path.relative_to(stage).as_posix())
