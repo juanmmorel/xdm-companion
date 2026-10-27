@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - main
-      - "codex/**"
+      - "Juanmorel/**"
     paths:
       - "scripts/*.ps1"
       - ".github/workflows/validate-windows-installer.yml"
