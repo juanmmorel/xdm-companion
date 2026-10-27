@@ -20,8 +20,4 @@ La detección y precarga se realizan en los sitios configurados para que el sele
 
 El servicio local escucha solo en `127.0.0.1`. El puente limita la comunicación a ese servicio y el servicio valida el origen del complemento y el sitio configurado antes de procesar la solicitud. Mantén actualizado el navegador, XDM y XDM Companion.
 
-## Contacto
-
-Para consultas de privacidad, contacta al responsable a través del canal de soporte del repositorio o del paquete desde el que obtuviste XDM Companion.
-
-**Antes de publicar:** aloja esta política en una dirección pública estable y declara esa URL en las fichas de Chrome Web Store y Mozilla Add-ons. No publiques una dirección de marcador ni una URL local.
+al.
