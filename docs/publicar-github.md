@@ -1,10 +1,10 @@
 # Publicar el repositorio y crear una release
 
-Esta guía publica el código fuente en GitHub y prepara instaladores para descargar releases públicas.
+Esta guía publica el código fuente en GitHub y prepara instaladores para descargar releases.
 
 ## 1. Crear el repositorio en GitHub
 
-En GitHub, crea un repositorio **público**. El instalador remoto consulta las releases sin autenticación, por lo que un repositorio privado no sirve para el comando de instalación mostrado abajo.
+En GitHub, crea un repositorio público si quieres que cualquier persona pueda instalarlo sin iniciar sesión. También puede ser privado: en ese caso, cada usuario debe tener acceso al repositorio y autenticarse con GitHub CLI antes de instalarlo.
 
 No marques las opciones para generar README, `.gitignore` o licencia: esos archivos ya están en el proyecto. El usuario de GitHub es `juanmmorel`; anota el nombre del repositorio como `REPO`.
 
@@ -59,7 +59,7 @@ git tag vX.Y.Z
 git push origin vX.Y.Z
 ```
 
-Sustituye `X.Y.Z` por la versión nueva. El workflow **Release XDM Companion** ejecuta las verificaciones, genera los paquetes de Linux y Windows y crea una release pública con sus checksums. En GitHub, abre **Actions** y confirma que la release contiene `xdm-companion-linux.tar.gz`, `xdm-companion-linux.tar.gz.sha256`, `xdm-companion-windows.zip` y `xdm-companion-windows.zip.sha256`.
+Sustituye `X.Y.Z` por la versión nueva. El workflow **Release XDM Companion** ejecuta las verificaciones, genera los paquetes de Linux y Windows y crea una release con sus checksums. En GitHub, abre **Actions** y confirma que la release contiene `xdm-companion-linux.tar.gz`, `xdm-companion-linux.tar.gz.sha256`, `xdm-companion-windows.zip` y `xdm-companion-windows.zip.sha256`.
 
 Para cada nueva versión, actualiza los dos manifiestos con el mismo valor, crea el tag `vX.Y.Z` correspondiente y súbelo.
 
@@ -71,7 +71,7 @@ Cuando la release esté publicada, ejecuta en Linux:
 bash <(curl -fsSL https://raw.githubusercontent.com/juanmmorel/REPO/main/scripts/install.sh) --repo juanmmorel/REPO
 ```
 
-Reemplaza `REPO` en los dos lugares. Este comando requiere Bash, conexión a GitHub y un repositorio público. El instalador obtiene la última release estable; para fijar una versión usa `--version vX.Y.Z`:
+Reemplaza `REPO` en los dos lugares. Este comando requiere Bash, conexión a GitHub y que el repositorio sea público. El instalador obtiene la última release estable; para fijar una versión usa `--version vX.Y.Z`:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/juanmmorel/REPO/main/scripts/install.sh) --repo juanmmorel/REPO --version vX.Y.Z
@@ -92,3 +92,34 @@ irm https://raw.githubusercontent.com/juanmmorel/REPO/main/scripts/install.ps1 |
 ```
 
 Reemplaza `REPO` por el nombre real del repositorio. El paquete Windows se publica en la misma release. Este instalador configura el servicio en segundo plano; la extensión **XDM Companion Bridge** se instala por separado desde la tienda del navegador. Para desinstalar, ejecuta `& "$env:LOCALAPPDATA\XDM Companion\uninstall.ps1"`.
+
+## Instalar desde un repositorio privado
+
+La autenticación SSH que permite `git push` no autoriza las descargas HTTPS de `curl` o `irm`. Para evitar el 404 de GitHub en un repositorio privado, cada usuario autorizado debe instalar [GitHub CLI](https://cli.github.com/) e iniciar sesión. El instalador detecta la sesión de `gh` y la utiliza para consultar la release y descargar los paquetes privados; no guarda el token en el repositorio.
+
+En Linux:
+
+```bash
+gh auth login --hostname github.com --web
+installer="$(mktemp)"
+gh api repos/juanmmorel/REPO/contents/scripts/install.sh -H 'Accept: application/vnd.github.raw+json' > "$installer" && bash "$installer" --repo juanmmorel/REPO
+status=$?
+rm -f "$installer"
+test "$status" -eq 0
+```
+
+En Windows PowerShell:
+
+```powershell
+gh auth login --hostname github.com --web
+$installer = Join-Path $env:TEMP "xdm-companion-install.ps1"
+try {
+  gh api repos/juanmmorel/REPO/contents/scripts/install.ps1 -H "Accept: application/vnd.github.raw+json" | Set-Content -LiteralPath $installer -Encoding UTF8
+  if ($LASTEXITCODE -ne 0) { throw "No se pudo descargar el instalador. Comprueba el acceso al repositorio." }
+  & $installer -Repository "juanmmorel/REPO"
+} finally {
+  Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
+}
+```
+
+Sustituye `REPO` por el nombre real en cada lugar. Si una persona no tiene acceso al repositorio privado, GitHub seguirá devolviendo 404; el instalador no puede conceder permisos ni hacer público el repositorio.

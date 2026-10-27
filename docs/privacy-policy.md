@@ -1,6 +1,7 @@
 # Política de privacidad de XDM Companion Bridge
 
-**Versión:** 1.1.20  
+**Versión:** 1.1.22
+
 **Última actualización:** 25 de octubre de 2026
 
 ## Datos que procesa

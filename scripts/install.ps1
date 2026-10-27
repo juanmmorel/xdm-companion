@@ -13,9 +13,37 @@ $appDataDir = Join-Path $env:LOCALAPPDATA "XDM Companion"
 $logDir = Join-Path $appDataDir "logs"
 $logFile = Join-Path $appDataDir "install.log"
 $transcriptStarted = $false
+$script:githubCli = Get-Command "gh.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+$script:githubToken = $env:XDM_COMPANION_GITHUB_TOKEN
+if (-not $script:githubToken) { $script:githubToken = $env:GH_TOKEN }
+if (-not $script:githubToken) { $script:githubToken = $env:GITHUB_TOKEN }
+if (-not $script:githubToken -and $script:githubCli) {
+  $tokenOutput = & $script:githubCli.Source auth token --hostname github.com 2>$null
+  if ($LASTEXITCODE -eq 0 -and $tokenOutput) {
+    $script:githubToken = ($tokenOutput -join "").Trim()
+  }
+}
+$script:useGithubCli = [bool]($script:githubCli -and $script:githubToken)
 
 function Write-Info([string]$Message) {
   Write-Host "[*] $Message"
+}
+
+function Invoke-GitHubCli([string[]]$Arguments) {
+  if (-not $script:githubCli) {
+    throw "GitHub CLI (gh) no está instalado."
+  }
+  $previousToken = $env:GH_TOKEN
+  try {
+    if ($script:githubToken) { $env:GH_TOKEN = $script:githubToken }
+    $output = & $script:githubCli.Source @Arguments
+    if ($LASTEXITCODE -ne 0) {
+      throw "GitHub CLI finalizó con código $LASTEXITCODE."
+    }
+    return $output
+  } finally {
+    $env:GH_TOKEN = $previousToken
+  }
 }
 
 function Stop-RunningCompanion([string]$MainScript) {
@@ -125,10 +153,29 @@ function Get-ValidatedRelease([string]$Repo, [string]$RequestedVersion) {
     $apiUrl = "https://api.github.com/repos/$Repo/releases/tags/$tag"
   }
 
-  $release = Invoke-RestMethod -Uri $apiUrl -Headers @{
-    Accept = "application/vnd.github+json"
-    "X-GitHub-Api-Version" = "2022-11-28"
-    "User-Agent" = "XDM-Companion-Installer"
+  if ($script:useGithubCli) {
+    $endpoint = if ($RequestedVersion -eq "latest") {
+      "repos/$Repo/releases/latest"
+    } else {
+      "repos/$Repo/releases/tags/$([Uri]::EscapeDataString($RequestedVersion))"
+    }
+    try {
+      $releaseLines = Invoke-GitHubCli -Arguments @("api", $endpoint)
+      $releaseJson = $releaseLines -join [Environment]::NewLine
+      $release = $releaseJson | ConvertFrom-Json
+    } catch {
+      throw "No se pudo leer la release de $Repo. Confirma que tu cuenta de GitHub tenga acceso al repositorio y sus releases."
+    }
+  } else {
+    try {
+      $release = Invoke-RestMethod -Uri $apiUrl -Headers @{
+        Accept = "application/vnd.github+json"
+        "X-GitHub-Api-Version" = "2022-11-28"
+        "User-Agent" = "XDM-Companion-Installer"
+      }
+    } catch {
+      throw "GitHub no permitió leer la release. Si el repositorio es privado, instala GitHub CLI, ejecuta 'gh auth login' con una cuenta autorizada y vuelve a ejecutar este instalador. Un repositorio privado solo está disponible para sus usuarios autorizados."
+    }
   }
   if ($release.draft -or $release.prerelease) {
     throw "GitHub devolvió una versión que no es una release estable publicada."
@@ -306,8 +353,20 @@ try {
   Write-Info "Descargando XDM Companion $($release.Tag)."
   $archivePath = Join-Path $workDir "xdm-companion-windows.zip"
   $checksumPath = Join-Path $workDir "xdm-companion-windows.zip.sha256"
-  Invoke-WebRequest -Uri $release.Archive -OutFile $archivePath
-  Invoke-WebRequest -Uri $release.Checksum -OutFile $checksumPath
+  if ($script:useGithubCli) {
+    Invoke-GitHubCli -Arguments @(
+      "release", "download", $release.Tag, "--repo", $Repository,
+      "--pattern", "xdm-companion-windows.zip",
+      "--pattern", "xdm-companion-windows.zip.sha256",
+      "--dir", $workDir
+    ) | Out-Null
+  } else {
+    Invoke-WebRequest -Uri $release.Archive -OutFile $archivePath
+    Invoke-WebRequest -Uri $release.Checksum -OutFile $checksumPath
+  }
+  if (-not (Test-Path -LiteralPath $archivePath) -or -not (Test-Path -LiteralPath $checksumPath)) {
+    throw "GitHub no entregó ambos archivos de la release. Revisa el acceso al repositorio y sus assets."
+  }
   $expectedHash = [regex]::Match((Get-Content -LiteralPath $checksumPath -Raw), "[0-9a-fA-F]{64}").Value
   $actualHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
   if (-not $expectedHash -or $actualHash -ne $expectedHash) {

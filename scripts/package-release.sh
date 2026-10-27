@@ -5,7 +5,7 @@ PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 TAG="${1:-}"
 OUTPUT_DIR="${2:-$PROJECT_DIR/dist/release}"
 [[ "$TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] || {
-  echo "Uso: scripts/package-release.sh v1.1.20 [directorio-de-salida]" >&2
+  echo "Uso: scripts/package-release.sh v1.1.22 [directorio-de-salida]" >&2
   exit 2
 }
 
