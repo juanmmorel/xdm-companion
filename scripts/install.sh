@@ -14,6 +14,23 @@ DO_UNINSTALL="false"
 PYTHON_BIN="${XDM_COMPANION_PYTHON:-python3}"
 WORK_DIR=""
 LOG_FILE="${XDG_STATE_HOME:-${HOME}/.local/state}/xdm-companion/install.log"
+GITHUB_TOKEN_VALUE="${XDM_COMPANION_GITHUB_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}"
+GITHUB_CLI_AUTHENTICATED="false"
+
+if [[ -z "$GITHUB_TOKEN_VALUE" ]] && command -v gh >/dev/null 2>&1; then
+  GITHUB_TOKEN_VALUE="$(gh auth token --hostname github.com 2>/dev/null || true)"
+fi
+if [[ -n "$GITHUB_TOKEN_VALUE" ]] && command -v gh >/dev/null 2>&1; then
+  GITHUB_CLI_AUTHENTICATED="true"
+fi
+
+gh_cli() {
+  if [[ -n "$GITHUB_TOKEN_VALUE" ]]; then
+    GH_TOKEN="$GITHUB_TOKEN_VALUE" gh "$@"
+  else
+    gh "$@"
+  fi
+}
 
 usage() {
   cat <<'USAGE'
@@ -24,12 +41,13 @@ Uso:
   bash install.sh --uninstall                            Desinstalar la instalación del usuario
 
 Opciones:
-  --repo OWNER/REPO   Repositorio público de GitHub
+  --repo OWNER/REPO   Repositorio de GitHub
   --version TAG       Release que se instalará; por defecto, la última release estable
   --yes               Instalar dependencias del sistema sin preguntar
   --uninstall         Ejecutar el desinstalador instalado
   --help              Mostrar esta ayuda
 
+Para un repositorio privado, inicia sesión con GitHub CLI (`gh auth login`) antes de ejecutar el instalador.
 El paquete de release debe contener xdm-companion-linux.tar.gz y su SHA-256.
 USAGE
 }
@@ -296,7 +314,7 @@ if [[ -n "$LOCAL_PROJECT" && "$REMOTE_INSTALL" != "true" ]]; then
 fi
 
 [[ "$REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail \
-  "No se conoce el repositorio público. Usa --repo OWNER/REPO o define XDM_COMPANION_REPOSITORY."
+  "No se conoce el repositorio. Usa --repo OWNER/REPO o define XDM_COMPANION_REPOSITORY."
 [[ "$RELEASE_VERSION" == "latest" || "$RELEASE_VERSION" =~ ^v?[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || fail \
   "Etiqueta de release no válida: $RELEASE_VERSION"
 
@@ -311,10 +329,23 @@ else
   RELEASE_API="https://api.github.com/repos/${REPOSITORY}/releases/tags/${RELEASE_VERSION}"
 fi
 log "Consultando release de $REPOSITORY ($RELEASE_VERSION)."
-curl --fail --silent --show-error --location --retry 3 \
-  --header "Accept: application/vnd.github+json" \
-  --header "X-GitHub-Api-Version: 2022-11-28" \
-  "$RELEASE_API" --output "$WORK_DIR/release.json"
+if [[ "$GITHUB_CLI_AUTHENTICATED" == "true" ]]; then
+  if [[ "$RELEASE_VERSION" == "latest" ]]; then
+    RELEASE_ENDPOINT="repos/${REPOSITORY}/releases/latest"
+  else
+    RELEASE_ENDPOINT="repos/${REPOSITORY}/releases/tags/${RELEASE_VERSION}"
+  fi
+  if ! gh_cli api "$RELEASE_ENDPOINT" > "$WORK_DIR/release.json"; then
+    fail "No se pudo leer la release de $REPOSITORY. Confirma que tu cuenta tenga acceso al repositorio y a sus releases."
+  fi
+else
+  if ! curl --fail --silent --show-error --location --retry 3 \
+    --header "Accept: application/vnd.github+json" \
+    --header "X-GitHub-Api-Version: 2022-11-28" \
+    "$RELEASE_API" --output "$WORK_DIR/release.json"; then
+    fail "GitHub no permitió leer la release. Si el repositorio es privado, instala GitHub CLI, ejecuta 'gh auth login' con una cuenta autorizada y vuelve a ejecutar este instalador. Un repositorio privado solo está disponible para sus usuarios autorizados."
+  fi
+fi
 
 mapfile -t RELEASE_INFO < <("$PYTHON_BIN" - "$WORK_DIR/release.json" "$REPOSITORY" "$RELEASE_VERSION" "$ASSET_NAME" <<'PY'
 import json
@@ -348,10 +379,19 @@ CHECKSUM_URL="${RELEASE_INFO[1]}"
 RELEASE_TAG="${RELEASE_INFO[2]}"
 
 log "Descargando XDM Companion $RELEASE_TAG."
-curl --fail --silent --show-error --location --retry 3 --connect-timeout 20 \
-  "$ARCHIVE_URL" --output "$WORK_DIR/$ASSET_NAME"
-curl --fail --silent --show-error --location --retry 3 --connect-timeout 20 \
-  "$CHECKSUM_URL" --output "$WORK_DIR/$ASSET_NAME.sha256"
+if [[ "$GITHUB_CLI_AUTHENTICATED" == "true" ]]; then
+  if ! gh_cli release download "$RELEASE_TAG" --repo "$REPOSITORY" \
+    --pattern "$ASSET_NAME" --pattern "$ASSET_NAME.sha256" --dir "$WORK_DIR"; then
+    fail "No se pudieron descargar los archivos de la release. Confirma que tu cuenta tenga permiso para leer sus assets."
+  fi
+else
+  curl --fail --silent --show-error --location --retry 3 --connect-timeout 20 \
+    "$ARCHIVE_URL" --output "$WORK_DIR/$ASSET_NAME"
+  curl --fail --silent --show-error --location --retry 3 --connect-timeout 20 \
+    "$CHECKSUM_URL" --output "$WORK_DIR/$ASSET_NAME.sha256"
+fi
+( -f "$WORK_DIR/$ASSET_NAME" && -f "$WORK_DIR/$ASSET_NAME.sha256" ) || fail \
+  "GitHub no entregó ambos archivos de la release. Revisa el acceso al repositorio y sus assets."
 (cd "$WORK_DIR" && sha256sum --check --strict "$ASSET_NAME.sha256")
 
 "$PYTHON_BIN" - "$WORK_DIR/$ASSET_NAME" <<'PY'
