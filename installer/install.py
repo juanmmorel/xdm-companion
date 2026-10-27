@@ -48,6 +48,17 @@ exec "$python" "$uninstaller" "$@"
   print(f"[*] Desinstalador disponible en: {command_path}")
 
 
+def install_windows_uninstaller():
+  """Keep a PowerShell uninstaller outside the tree it removes."""
+  app_data = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+  destination_dir = os.path.join(app_data, "XDM Companion")
+  os.makedirs(destination_dir, exist_ok=True)
+  source = os.path.join(PROJECT_DIR, "scripts", "uninstall.ps1")
+  destination = os.path.join(destination_dir, "uninstall.ps1")
+  shutil.copy2(source, destination)
+  print(f"[*] Desinstalador disponible en: {destination}")
+
+
 def browser_integrations_ready(browser_statuses):
   return bool(browser_statuses) and all(
       browser_integration_ready(browser, status)
@@ -80,8 +91,9 @@ def browser_integration_report(browser_statuses):
   return report
 
 
-def installation_ready(js_runtime, browser_statuses):
-  return bool(js_runtime) and browser_integrations_ready(browser_statuses)
+def installation_ready(js_runtime, browser_statuses, system=None):
+  browser_setup_ready = system == "Windows" or browser_integrations_ready(browser_statuses)
+  return bool(js_runtime) and browser_setup_ready
 
 
 def get_supported_js_runtime():
@@ -172,6 +184,8 @@ def main():
     browser_statuses = install_linux_browser_bridges(xdm_config_dir)
     for browser, status in browser_statuses:
       print(f"[*] {browser}: {status}")
+  elif system == "Windows":
+    print("[*] El servicio está preparado; instala XDM Companion Bridge desde la tienda del navegador.")
   else:
     browser_statuses = [("Navegadores", "la instalación automática solo está preparada para Linux")]
     print(f"[!] {browser_statuses[0][0]}: {browser_statuses[0][1]}")
@@ -241,15 +255,22 @@ WantedBy=default.target
   elif system == "Windows":
     import winreg
     key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    pythonw_env = os.path.join(os.path.dirname(python_env), "pythonw.exe")
+    startup_python = pythonw_env if os.path.isfile(pythonw_env) else python_env
     try:
-      reg_key = winreg.OpenKey(
+      with winreg.CreateKeyEx(
           winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE
-      )
-      winreg.SetValueEx(reg_key, "XDMCompanion", 0, winreg.REG_SZ, f'"{python_env}" "{main_script_target}"')
-      winreg.CloseKey(reg_key)
+      ) as reg_key:
+        winreg.SetValueEx(
+            reg_key,
+            "XDMCompanion",
+            0,
+            winreg.REG_SZ,
+            f'"{startup_python}" "{main_script_target}"',
+        )
       print("[*] Inicio automático configurado en el Registro de Windows.")
-    except Exception as e:
-      print(f"[!] No se pudo configurar el inicio automático: {e}")
+    except OSError as error:
+      raise SystemExit(f"[!] No se pudo configurar el inicio automático: {error}") from error
 
   elif system == "Darwin":  # macOS
     launch_agents_dir = os.path.join(home_dir, "Library", "LaunchAgents")
@@ -281,12 +302,18 @@ WantedBy=default.target
     print("[*] Agente de inicio de macOS configurado.")
 
   browser_ready = browser_integrations_ready(browser_statuses)
-  all_ready = installation_ready(js_runtime, browser_statuses)
+  all_ready = installation_ready(js_runtime, browser_statuses, system)
   if system == "Linux":
     install_persistent_uninstaller(xdm_config_dir)
+  elif system == "Windows":
+    install_windows_uninstaller()
   print("[*] ==================================================")
   if all_ready:
-    print("[*] ¡Instalación completada! El puente se activa al reiniciar Chrome y Firefox.")
+    if system == "Windows":
+      print("[*] ¡Instalación completada! El servicio se inicia al iniciar sesión en Windows.")
+      print("[*] Instala XDM Companion Bridge desde la tienda del navegador para habilitar la detección.")
+    else:
+      print("[*] ¡Instalación completada! El puente se activa al reiniciar Chrome y Firefox.")
   else:
     print("[!] Instalación parcial; el servicio quedó activo.")
     if not browser_ready:

@@ -1,0 +1,40 @@
+name: Validate Windows installer
+
+on:
+  push:
+    branches:
+      - main
+      - "codex/**"
+    paths:
+      - "scripts/*.ps1"
+      - ".github/workflows/validate-windows-installer.yml"
+  pull_request:
+    paths:
+      - "scripts/*.ps1"
+      - ".github/workflows/validate-windows-installer.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  parse-powershell:
+    runs-on: windows-latest
+    steps:
+      - name: Obtener el código
+        uses: actions/checkout@v4
+
+      - name: Analizar los scripts de PowerShell
+        shell: pwsh
+        run: |
+          $files = @("scripts/install.ps1", "scripts/uninstall.ps1")
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $file).Path, [ref]$tokens, [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Error $_.Message }
+              exit 1
+            }
+          }

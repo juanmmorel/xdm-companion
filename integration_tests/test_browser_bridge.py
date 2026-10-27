@@ -241,6 +241,13 @@ def test_installer_distinguishes_full_browser_setup_from_partial_setup():
   ])
 
 
+def test_windows_installer_is_ready_when_service_runtime_is_available():
+  runtime = {"name": "deno", "path": r"C:\Users\test\deno.exe"}
+
+  assert install.installation_ready(runtime, [], "Windows")
+  assert not install.installation_ready(None, [], "Windows")
+
+
 def test_linux_installer_copies_signed_firefox_xpi_to_policy_accessible_path(tmp_path, monkeypatch):
   monkeypatch.setattr(browser_bridge, "find_chrome_binary", lambda: None)
   monkeypatch.setattr(browser_bridge, "contains_firefox_signature_metadata", lambda _path: True)
