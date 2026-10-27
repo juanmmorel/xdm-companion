@@ -27,34 +27,3 @@ irm https://raw.githubusercontent.com/juanmmorel/xdm-companion/main/scripts/inst
 ```
 
 The installer prepares the background service, verifies the downloaded package, and starts the service. It uses Python 3.10 or newer and installs Python with WinGet when it is missing and WinGet is available. Install **XDM Companion Bridge** separately from the Chrome Web Store or Firefox Add-ons. To remove the service, run `& "$env:LOCALAPPDATA\XDM Companion\uninstall.ps1"` in PowerShell.
-
-## Install from a private GitHub repository
-
-The `curl` and `irm` commands above work for public repositories. For a private repository, install [GitHub CLI](https://cli.github.com/), sign in as an account that has access to the repository, and fetch the installer through the authenticated GitHub API. SSH authentication alone does not authenticate these HTTPS downloads.
-
-On Linux:
-
-```bash
-gh auth login --hostname github.com --web
-installer="$(mktemp)"
-gh api repos/juanmmorel/xdm-companion/contents/scripts/install.sh -H 'Accept: application/vnd.github.raw+json' > "$installer" && bash "$installer" --repo juanmmorel/xdm-companion
-status=$?
-rm -f "$installer"
-test "$status" -eq 0
-```
-
-On Windows PowerShell:
-
-```powershell
-gh auth login --hostname github.com --web
-$installer = Join-Path $env:TEMP "xdm-companion-install.ps1"
-try {
-  gh api repos/juanmmorel/xdm-companion/contents/scripts/install.ps1 -H "Accept: application/vnd.github.raw+json" | Set-Content -LiteralPath $installer -Encoding UTF8
-  if ($LASTEXITCODE -ne 0) { throw "Could not fetch the installer. Check repository access." }
-  & $installer -Repository "juanmmorel/xdm-companion"
-} finally {
-  Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
-}
-```
-
-Every person installing from a private repository must have GitHub access to it. The installer uses the local GitHub CLI login to fetch private release files and does not save the authentication token in the project.
