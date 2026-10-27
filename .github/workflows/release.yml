@@ -9,7 +9,30 @@ permissions:
   contents: write
 
 jobs:
-  release-linux:
+  check-windows-installer:
+    runs-on: windows-latest
+    steps:
+      - name: Obtener el código
+        uses: actions/checkout@v4
+
+      - name: Validar sintaxis de PowerShell
+        shell: pwsh
+        run: |
+          $files = @("scripts/install.ps1", "scripts/uninstall.ps1")
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $file).Path, [ref]$tokens, [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Error $_.Message }
+              exit 1
+            }
+          }
+
+  release:
+    needs: check-windows-installer
     runs-on: ubuntu-latest
     steps:
       - name: Obtener el código
@@ -34,7 +57,7 @@ jobs:
           python -m pytest -q -p no:cacheprovider
           node integration_tests/browser_bridge.test.js
 
-      - name: Crear el paquete reproducible de Linux
+      - name: Crear los paquetes reproducibles de Linux y Windows
         run: scripts/package-release.sh "$GITHUB_REF_NAME"
 
       - name: Publicar la release y sus checksums
@@ -44,5 +67,7 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             "dist/release/$GITHUB_REF_NAME/xdm-companion-linux.tar.gz" \
             "dist/release/$GITHUB_REF_NAME/xdm-companion-linux.tar.gz.sha256" \
+            "dist/release/$GITHUB_REF_NAME/xdm-companion-windows.zip" \
+            "dist/release/$GITHUB_REF_NAME/xdm-companion-windows.zip.sha256" \
             --title "XDM Companion $GITHUB_REF_NAME" \
             --generate-notes

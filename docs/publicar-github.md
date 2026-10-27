@@ -1,6 +1,6 @@
-# Publicar el repositorio y crear la primera release
+# Publicar el repositorio y crear una release
 
-Esta guía publica el código fuente en GitHub y prepara el instalador para descargar la primera versión desde una release pública.
+Esta guía publica el código fuente en GitHub y prepara instaladores para descargar releases públicas.
 
 ## 1. Crear el repositorio en GitHub
 
@@ -50,18 +50,18 @@ git push -u origin main
 
 Sustituye `REPO` por el nombre que elegiste. Si Git te pide identificarte, configura `user.name` y `user.email` y repite el commit.
 
-## 4. Publicar la primera versión
+## 4. Publicar una nueva versión
 
-Ahora ambos manifiestos tienen la versión `1.1.20`. El nombre del tag debe coincidir con esa versión para que el empaquetador lo acepte:
+La versión `v1.1.20` ya fue publicada antes de añadir el paquete de Windows. No vuelvas a usar ese tag: GitHub no actualizará automáticamente sus archivos. Para publicar estos cambios, asigna la misma versión nueva a los manifiestos de Chrome y Firefox; el tag debe coincidir con ella para que el empaquetador lo acepte:
 
 ```bash
-git tag v1.1.20
-git push origin v1.1.20
+git tag vX.Y.Z
+git push origin vX.Y.Z
 ```
 
-El workflow **Release XDM Companion** ejecuta las verificaciones, genera el paquete Linux y crea una release pública con el archivo y su checksum. En GitHub, abre **Actions** y espera que termine correctamente; luego confirma en **Releases** que `v1.1.20` incluye `xdm-companion-linux.tar.gz` y `xdm-companion-linux.tar.gz.sha256`.
+Sustituye `X.Y.Z` por la versión nueva. El workflow **Release XDM Companion** ejecuta las verificaciones, genera los paquetes de Linux y Windows y crea una release pública con sus checksums. En GitHub, abre **Actions** y confirma que la release contiene `xdm-companion-linux.tar.gz`, `xdm-companion-linux.tar.gz.sha256`, `xdm-companion-windows.zip` y `xdm-companion-windows.zip.sha256`.
 
-Para futuras versiones, actualiza la versión en los manifiestos Chrome y Firefox al mismo valor, crea el tag correspondiente y súbelo. Por ejemplo, `v1.1.20` debe coincidir con `1.1.20` en ambos manifiestos.
+Para cada nueva versión, actualiza los dos manifiestos con el mismo valor, crea el tag `vX.Y.Z` correspondiente y súbelo.
 
 ## 5. Instalar desde la release
 
@@ -71,10 +71,10 @@ Cuando la release esté publicada, ejecuta en Linux:
 bash <(curl -fsSL https://raw.githubusercontent.com/juanmmorel/REPO/main/scripts/install.sh) --repo juanmmorel/REPO
 ```
 
-Reemplaza `REPO` en los dos lugares. Este comando requiere Bash, conexión a GitHub y un repositorio público. El instalador obtiene la última release estable; para fijar una versión usa `--version v1.1.20`:
+Reemplaza `REPO` en los dos lugares. Este comando requiere Bash, conexión a GitHub y un repositorio público. El instalador obtiene la última release estable; para fijar una versión usa `--version vX.Y.Z`:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/juanmmorel/REPO/main/scripts/install.sh) --repo juanmmorel/REPO --version v1.1.20
+bash <(curl -fsSL https://raw.githubusercontent.com/juanmmorel/REPO/main/scripts/install.sh) --repo juanmmorel/REPO --version vX.Y.Z
 ```
 
 También puedes descargar y revisar el script antes de ejecutarlo:
@@ -84,3 +84,11 @@ curl -fsSL https://raw.githubusercontent.com/juanmmorel/REPO/main/scripts/instal
 less /tmp/xdm-companion-install.sh
 bash /tmp/xdm-companion-install.sh --repo juanmmorel/REPO
 ```
+
+En Windows, abre PowerShell y ejecuta:
+
+```powershell
+irm https://raw.githubusercontent.com/juanmmorel/REPO/main/scripts/install.ps1 | iex
+```
+
+Reemplaza `REPO` por el nombre real del repositorio. El paquete Windows se publica en la misma release. Este instalador configura el servicio en segundo plano; la extensión **XDM Companion Bridge** se instala por separado desde la tienda del navegador. Para desinstalar, ejecuta `& "$env:LOCALAPPDATA\XDM Companion\uninstall.ps1"`.

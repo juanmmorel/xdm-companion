@@ -16,4 +16,14 @@ After a GitHub release has been published, run this command on Linux to install 
 bash <(curl -fsSL https://raw.githubusercontent.com/juanmmorel/xdm-companion/main/scripts/install.sh) --repo juanmmorel/xdm-companion
 ```
 
-This command requires Bash and a supported Linux distribution. It does not run in Windows PowerShell or Command Prompt: the release package and automatic browser integration are Linux-specific. Running it from WSL installs the service inside WSL; it does not install or connect the service to browsers running directly on Windows.
+This command requires Bash and a supported Linux distribution. Running it from WSL installs the service inside WSL; it does not install or connect the service to browsers running directly on Windows.
+
+## Install on Windows
+
+Open PowerShell and run this command after a release with the Windows package has been published:
+
+```powershell
+irm https://raw.githubusercontent.com/juanmmorel/xdm-companion/main/scripts/install.ps1 | iex
+```
+
+The installer prepares the background service, verifies the downloaded package, and starts the service. It uses Python 3.10 or newer and installs Python with WinGet when it is missing and WinGet is available. Install **XDM Companion Bridge** separately from the Chrome Web Store or Firefox Add-ons. To remove the service, run `& "$env:LOCALAPPDATA\XDM Companion\uninstall.ps1"` in PowerShell.
