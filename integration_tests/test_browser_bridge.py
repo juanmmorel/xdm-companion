@@ -62,8 +62,15 @@ def test_build_extension_scopes_permissions_to_configured_sites(tmp_path):
   assert chrome["content_scripts"][0]["run_at"] == "document_start"
   assert chrome["content_scripts"][0]["all_frames"] is True
   assert chrome["content_scripts"][0]["js"] == ["site-config.js", "content.js"]
-  assert chrome["version"] == "1.1.22"
-  assert firefox["version"] == "1.1.22"
+  chrome_source_manifest = json.loads(
+      (source / "manifest.chrome.json").read_text(encoding="utf-8")
+  )
+  firefox_source_manifest = json.loads(
+      (source / "manifest.firefox.json").read_text(encoding="utf-8")
+  )
+  assert chrome["version"] == chrome_source_manifest["version"]
+  assert firefox["version"] == firefox_source_manifest["version"]
+  assert chrome["version"] == firefox["version"]
   assert chrome["manifest_version"] == 3
   assert firefox["manifest_version"] == 3
   assert chrome["permissions"] == ["cookies", "scripting"]
