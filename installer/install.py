@@ -120,6 +120,100 @@ def get_supported_js_runtime():
   return None
 
 
+def install_apt_venv_support():
+  """Install Ubuntu/Debian's version-matched venv package when requested."""
+  apt_get = shutil.which("apt-get")
+  if not apt_get:
+    return False
+
+  package = f"python{sys.version_info.major}.{sys.version_info.minor}-venv"
+  if hasattr(os, "geteuid") and os.geteuid() == 0:
+    prefix = []
+  else:
+    sudo = shutil.which("sudo")
+    if not sudo:
+      return False
+    prefix = [sudo]
+
+  if not sys.stdin.isatty():
+    print(
+        f"[!] Falta el soporte de entornos virtuales. Instálalo y vuelve a ejecutar:\n"
+        f"    sudo apt-get update && sudo apt-get install -y {package}"
+    )
+    return False
+
+  answer = input(
+      f"[*] Falta {package}; ¿quieres que lo instale con apt? [S/n] "
+  ).strip().lower()
+  if answer and answer not in ("s", "si", "sí", "y", "yes"):
+    return False
+
+  print("[*] Actualizando el índice de paquetes de apt...")
+  update = subprocess.run([*prefix, apt_get, "update"], check=False)
+  if update.returncode != 0:
+    print("[!] No se pudo actualizar el índice de paquetes de apt.")
+    return False
+
+  for candidate in (package, "python3-venv"):
+    print(f"[*] Instalando {candidate}...")
+    result = subprocess.run(
+        [*prefix, apt_get, "install", "-y", candidate],
+        check=False,
+    )
+    if result.returncode == 0:
+      return True
+  return False
+
+
+def create_production_venv(prod_venv_dir, system):
+  command = [sys.executable, "-m", "venv", prod_venv_dir]
+  result = subprocess.run(command, capture_output=True, text=True, check=False)
+  if result.returncode == 0:
+    if result.stdout:
+      print(result.stdout, end="")
+    return
+
+  error_output = "\n".join(part for part in (result.stdout, result.stderr) if part)
+  lower_error = error_output.lower()
+  missing_venv_support = (
+      "ensurepip" in lower_error
+      or ("no module named" in lower_error and "venv" in lower_error)
+  )
+  if system == "Linux" and missing_venv_support and shutil.which("apt-get"):
+    versioned_package = (
+        f"python{sys.version_info.major}.{sys.version_info.minor}-venv"
+    )
+    print(
+        f"[!] Python no tiene ensurepip; Ubuntu/Debian necesita {versioned_package}."
+    )
+    if install_apt_venv_support():
+      if os.path.exists(prod_venv_dir):
+        shutil.rmtree(prod_venv_dir)
+      print("[*] Reintentando la creación del entorno virtual...")
+      retry = subprocess.run(command, check=False)
+      if retry.returncode == 0:
+        return
+      raise SystemExit(
+          "[!] Python sigue sin poder crear el entorno virtual. Comprueba la salida "
+          "del sistema e instala los requisitos de Python para esta distribución."
+      )
+
+    if os.path.exists(prod_venv_dir):
+      shutil.rmtree(prod_venv_dir)
+    raise SystemExit(
+        f"[!] No se pudo preparar el entorno virtual. Instala el paquete "
+        f"{versioned_package} y vuelve a ejecutar el instalador. Comando: "
+        f"sudo apt-get update && sudo apt-get install -y {versioned_package}"
+    )
+
+  if error_output:
+    print(error_output, file=sys.stderr)
+  raise SystemExit(
+      f"[!] No se pudo crear el entorno virtual de producción (código "
+      f"{result.returncode})."
+  )
+
+
 def main():
   system = platform.system()
   print(f"[*] ==================================================")
@@ -150,7 +244,7 @@ def main():
       print("[!] Se encontró un entorno virtual incompleto; se va a reconstruir.")
       shutil.rmtree(prod_venv_dir)
     print("[*] Creando entorno virtual de producción...")
-    run_command([sys.executable, "-m", "venv", prod_venv_dir])
+    create_production_venv(prod_venv_dir, system)
   if not os.path.isfile(python_env):
     raise SystemExit("[!] No se pudo crear el entorno virtual de XDM Companion.")
 

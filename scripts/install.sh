@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 
 # Installs XDM Companion from a local checkout or the latest published GitHub release.
+if [ -z "${BASH_VERSION:-}" ]; then
+  printf '[!] Este instalador requiere Bash; ejecútalo con bash, no con sh.\n' >&2
+  exit 2
+fi
+
 set -Eeuo pipefail
 umask 077
 
@@ -106,12 +111,17 @@ fi
 install_missing_dependencies() {
   local missing=()
   local command_name
-  for command_name in curl tar sha256sum tee; do
+  for command_name in curl tar sha256sum tee mktemp; do
     command -v "$command_name" >/dev/null 2>&1 || missing+=("$command_name")
   done
   command -v "$PYTHON_BIN" >/dev/null 2>&1 || missing+=("python3")
-  if command -v "$PYTHON_BIN" >/dev/null 2>&1 && ! "$PYTHON_BIN" -c 'import venv' >/dev/null 2>&1; then
-    missing+=("python3-venv")
+  if command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+    local venv_probe_dir
+    venv_probe_dir="$(mktemp -d "${TMPDIR:-/tmp}/xdm-companion-venv-check.XXXXXXXX")"
+    if ! "$PYTHON_BIN" -m venv "$venv_probe_dir/env" >/dev/null 2>&1; then
+      missing+=("python3-venv")
+    fi
+    rm -rf -- "$venv_probe_dir"
   fi
   ((${#missing[@]} == 0)) && return 0
 
@@ -390,7 +400,7 @@ else
   curl --fail --silent --show-error --location --retry 3 --connect-timeout 20 \
     "$CHECKSUM_URL" --output "$WORK_DIR/$ASSET_NAME.sha256"
 fi
-( -f "$WORK_DIR/$ASSET_NAME" && -f "$WORK_DIR/$ASSET_NAME.sha256" ) || fail \
+[[ -f "$WORK_DIR/$ASSET_NAME" && -f "$WORK_DIR/$ASSET_NAME.sha256" ]] || fail \
   "GitHub no entregó ambos archivos de la release. Revisa el acceso al repositorio y sus assets."
 (cd "$WORK_DIR" && sha256sum --check --strict "$ASSET_NAME.sha256")
 
