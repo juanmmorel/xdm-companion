@@ -27,3 +27,7 @@ irm https://raw.githubusercontent.com/juanmmorel/xdm-companion/main/scripts/inst
 ```
 
 The installer prepares the background service, verifies the downloaded package, and starts the service. It uses Python 3.10 or newer and installs Python with WinGet when it is missing and WinGet is available. Install **XDM Companion Bridge** separately from the Chrome Web Store or Firefox Add-ons. To remove the service, run `& "$env:LOCALAPPDATA\XDM Companion\uninstall.ps1"` in PowerShell.
+
+## Load a local Chrome build
+
+For local testing, run `python3 scripts/build-chrome-unpacked.py` from the project directory. In Chrome, open `chrome://extensions`, enable **Developer mode**, choose **Load unpacked**, and select `dist/local/xdm-companion-chrome-unpacked`. Select the folder that contains `manifest.json`; the source folder `browser-bridge` contains templates and is not loadable directly.

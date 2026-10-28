@@ -57,7 +57,13 @@ jobs:
           import zipfile
 
           linux_archive, windows_archive = map(pathlib.Path, sys.argv[1:])
-          required = {"installer/install.py", "installer/uninstall.py", "core/domains.json", "requirements.txt"}
+          required = {
+              "installer/install.py",
+              "installer/uninstall.py",
+              "core/domains.json",
+              "requirements.txt",
+              "browser-bridge/chrome-unpacked/manifest.json",
+          }
           with tarfile.open(linux_archive, "r:gz") as archive:
             linux_files = {str(pathlib.PurePosixPath(name)) for name in archive.getnames()}
           with zipfile.ZipFile(windows_archive) as archive:

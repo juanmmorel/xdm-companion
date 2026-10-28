@@ -27,8 +27,10 @@ cp -a "$PROJECT_DIR/core/." "$STAGE/core/"
 cp -a "$PROJECT_DIR/browser-bridge/." "$STAGE/browser-bridge/"
 cp "$PROJECT_DIR/installer/install.py" "$PROJECT_DIR/installer/uninstall.py" \
   "$PROJECT_DIR/installer/browser_bridge.py" "$STAGE/installer/"
-cp "$PROJECT_DIR/scripts/uninstall.ps1" "$STAGE/scripts/"
+cp "$PROJECT_DIR/scripts/uninstall.ps1" "$PROJECT_DIR/scripts/build-chrome-unpacked.py" "$STAGE/scripts/"
 cp "$PROJECT_DIR/requirements.txt" "$PROJECT_DIR/README.md" "$PROJECT_DIR/LICENSE" "$STAGE/"
+python3 "$PROJECT_DIR/scripts/build-chrome-unpacked.py" \
+  --output "$STAGE/browser-bridge/chrome-unpacked"
 find "$STAGE" -type d -name __pycache__ -prune -exec rm -rf -- {} +
 find "$STAGE" -type f \( -name '*.pyc' -o -name '*.bck' \) -delete
 

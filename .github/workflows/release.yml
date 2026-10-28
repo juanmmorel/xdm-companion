@@ -60,6 +60,52 @@ jobs:
       - name: Crear los paquetes reproducibles de Linux y Windows
         run: scripts/package-release.sh "$GITHUB_REF_NAME"
 
+      - name: Verificar los paquetes antes de publicarlos
+        run: |
+          cd "dist/release/$GITHUB_REF_NAME"
+          sha256sum --check --strict \
+            xdm-companion-linux.tar.gz.sha256 \
+            xdm-companion-windows.zip.sha256
+          python3 - <<'PY'
+          import json
+          import pathlib
+          import tarfile
+          import zipfile
+
+          required = {
+              "installer/install.py",
+              "installer/uninstall.py",
+              "core/domains.json",
+              "requirements.txt",
+              "browser-bridge/chrome-unpacked/manifest.json",
+          }
+          with tarfile.open("xdm-companion-linux.tar.gz", "r:gz") as archive:
+              linux_files = {
+                  pathlib.PurePosixPath(name).as_posix()
+                  for name in archive.getnames()
+              }
+              linux_files = {name.removeprefix("./") for name in linux_files}
+              if not required.issubset(linux_files):
+                  raise SystemExit(f"Paquete Linux incompleto: {sorted(required - linux_files)}")
+              manifest_member = next(
+                  item for item in archive.getmembers()
+                  if item.name.removeprefix("./") == "browser-bridge/chrome-unpacked/manifest.json"
+              )
+              linux_manifest = json.load(archive.extractfile(manifest_member))
+          with zipfile.ZipFile("xdm-companion-windows.zip") as archive:
+              windows_files = set(archive.namelist())
+              if not required.issubset(windows_files):
+                  raise SystemExit(f"Paquete Windows incompleto: {sorted(required - windows_files)}")
+              windows_manifest = json.loads(
+                  archive.read("browser-bridge/chrome-unpacked/manifest.json")
+              )
+          if linux_manifest.get("manifest_version") != 3 or windows_manifest.get("manifest_version") != 3:
+              raise SystemExit("El puente local de Chrome requiere Manifest V3.")
+          if linux_manifest.get("version") != windows_manifest.get("version"):
+              raise SystemExit("Las versiones del puente de Chrome no coinciden entre paquetes.")
+          print(f"Paquetes verificados; puente local de Chrome {linux_manifest['version']} incluido.")
+          PY
+
       - name: Publicar la release y sus checksums
         env:
           GH_TOKEN: ${{ github.token }}
