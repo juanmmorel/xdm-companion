@@ -216,11 +216,12 @@ def chrome_external_extension_directory(chrome_binary, home_dir=None, config_hom
         "chrome-beta": "google-chrome-beta",
         "chrome-unstable": "google-chrome-unstable",
     }.get(channel, "google-chrome")
-    config_dir = (
-        Path(config_home)
-        if config_home
-        else Path(os.environ.get("XDG_CONFIG_HOME") or Path(home_dir or Path.home()) / ".config")
-    )
+    if config_home:
+      config_dir = Path(config_home)
+    elif home_dir:
+      config_dir = Path(home_dir) / ".config"
+    else:
+      config_dir = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
     return config_dir / app_name / "External Extensions"
   if "chromium" in binary.parent.name:
     raise BrowserBridgeError(

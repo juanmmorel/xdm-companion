@@ -259,13 +259,28 @@ def test_windows_installer_is_ready_when_service_runtime_is_available():
   assert not install.installation_ready(None, [], "Windows")
 
 
-def test_linux_chrome_external_registration_uses_the_users_config_directory(tmp_path):
+def test_linux_chrome_external_registration_uses_explicit_home_over_ci_xdg_config(
+    tmp_path, monkeypatch
+):
+  monkeypatch.setenv("XDG_CONFIG_HOME", "/home/runner/.config")
   directory = browser_bridge.chrome_external_extension_directory(
       "/opt/google/chrome/chrome",
       home_dir=tmp_path,
   )
 
   assert directory == tmp_path / ".config/google-chrome/External Extensions"
+
+
+def test_linux_chrome_external_registration_honors_xdg_when_home_is_not_overridden(
+    tmp_path, monkeypatch
+):
+  monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "custom-config"))
+
+  directory = browser_bridge.chrome_external_extension_directory(
+      "/opt/google/chrome/chrome",
+  )
+
+  assert directory == tmp_path / "custom-config/google-chrome/External Extensions"
 
 
 def test_chromium_system_registration_is_rejected_without_requesting_admin():
