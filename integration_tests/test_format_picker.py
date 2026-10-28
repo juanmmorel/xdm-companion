@@ -120,6 +120,39 @@ def test_sd_only_source_is_ranked_by_actual_resolution_without_fixed_cutoff():
   assert [option["height"] for option, _media in options] == [480, 360, 240]
 
 
+def test_compatible_sites_use_extractor_resolution_when_height_is_missing():
+  info = {
+      "title": "Video de un sitio compatible",
+      "formats": [
+          {
+              "format_id": "wide-resolution",
+              "url": "https://cdn.example/video-1080",
+              "resolution": "1920x1080",
+              "vcodec": "avc1",
+              "acodec": "mp4a",
+              "ext": "mp4",
+          },
+          {
+              "format_id": "label-resolution",
+              "url": "https://cdn.example/video-720",
+              "resolution": "720p",
+              "vcodec": "avc1",
+              "acodec": "mp4a",
+              "ext": "mp4",
+          },
+      ],
+  }
+
+  options = main._available_formats(
+      info, "https://vimeo.com/example", [], "test-agent",
+  )
+  inventory = main._format_inventory(info, options)
+
+  assert [option["height"] for option, _media in options] == [1080, 720]
+  assert [media["height"] for _option, media in options] == [1080, 720]
+  assert inventory["source_heights"] == [1080, 720]
+
+
 def test_youtube_video_only_4k_is_listed_when_it_has_a_dash_manifest():
   info = {
       "title": "4K video",

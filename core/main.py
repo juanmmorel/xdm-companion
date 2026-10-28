@@ -1,5 +1,6 @@
 import json
 import ipaddress
+import math
 import os
 import re
 import shutil
@@ -424,10 +425,7 @@ def _media_from_format(
         media_headers.pop(header_name)
     media_headers["Accept-Language"] = [language_header]
 
-  try:
-    height = int(selected.get("height") or 0)
-  except (TypeError, ValueError):
-    height = 0
+  height = _format_height(selected)
   try:
     fps = float(selected.get("fps") or 0)
   except (TypeError, ValueError):
@@ -470,9 +468,30 @@ def _extract_media(page_url, cookies, user_agent, browser_title, audio_track=Non
   )
 
 
+def _format_height(video_format):
+  """Read resolution from extractor metadata without relying on a site name."""
+  try:
+    height = float(video_format.get("height") or 0)
+  except (TypeError, ValueError):
+    height = 0
+  if math.isfinite(height) and height > 0:
+    return int(height)
+
+  resolution = str(video_format.get("resolution") or "").strip().lower()
+  match = re.fullmatch(r"\d+\s*x\s*(\d+)", resolution)
+  if not match:
+    match = re.fullmatch(r"(\d+)\s*p(?:\d+)?", resolution)
+  if not match:
+    return 0
+  try:
+    return int(match.group(1))
+  except (TypeError, ValueError):
+    return 0
+
+
 def _format_score(video_format):
   try:
-    height = int(video_format.get("height") or 0)
+    height = _format_height(video_format)
   except (TypeError, ValueError):
     height = 0
   try:
@@ -583,13 +602,17 @@ def _available_formats(info, page_url, cookies, user_agent, audio_track=None, ac
       continue
     if video_format.get("vcodec") in (None, "", "none"):
       continue
+    height = _format_height(video_format)
+    if height <= 0 or not video_format.get("format_id"):
+      continue
     url_path = urlparse(str(video_format.get("url") or "")).path.lower()
     manifest_source = _manifest_source(video_format)
     is_dash_manifest = (
         url_path.endswith(".mpd")
         or bool(manifest_source and manifest_source[1] == "http_dash_segments")
     )
-    media_format = _format_for_xdm(video_format)
+    media_format = dict(_format_for_xdm(video_format))
+    media_format["height"] = height
     if not media_format.get("url"):
       continue
     has_audio = str(video_format.get("acodec") or "").lower() not in {"", "none"}
@@ -604,12 +627,6 @@ def _available_formats(info, page_url, cookies, user_agent, audio_track=None, ac
       ):
         continue
     elif not has_audio and not is_dash_manifest:
-      continue
-    try:
-      height = int(video_format.get("height") or 0)
-    except (TypeError, ValueError):
-      height = 0
-    if height <= 0 or not video_format.get("format_id"):
       continue
     current = formats_by_height.get(height)
     # At a given height, keep a combined stream or XDM-readable manifest ahead
@@ -666,10 +683,7 @@ def _format_inventory(info, available):
       continue
     if video_format.get("vcodec") in (None, "", "none") or not video_format.get("url"):
       continue
-    try:
-      height = int(video_format.get("height") or 0)
-    except (TypeError, ValueError):
-      continue
+    height = _format_height(video_format)
     if height <= 0:
       continue
     source_heights.add(height)

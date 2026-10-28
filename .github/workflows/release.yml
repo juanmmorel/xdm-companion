@@ -77,6 +77,8 @@ jobs:
               "installer/uninstall.py",
               "core/domains.json",
               "requirements.txt",
+              "browser-bridge/manifest.json",
+              "browser-bridge/site-config.js",
               "browser-bridge/chrome-unpacked/manifest.json",
           }
           with tarfile.open("xdm-companion-linux.tar.gz", "r:gz") as archive:
@@ -103,6 +105,19 @@ jobs:
               raise SystemExit("El puente local de Chrome requiere Manifest V3.")
           if linux_manifest.get("version") != windows_manifest.get("version"):
               raise SystemExit("Las versiones del puente de Chrome no coinciden entre paquetes.")
+          with tarfile.open("xdm-companion-linux.tar.gz", "r:gz") as archive:
+              root_manifest_member = next(
+                  item for item in archive.getmembers()
+                  if item.name.removeprefix("./") == "browser-bridge/manifest.json"
+              )
+              linux_root_manifest = json.load(archive.extractfile(root_manifest_member))
+          with zipfile.ZipFile("xdm-companion-windows.zip") as archive:
+              windows_root_manifest = json.loads(archive.read("browser-bridge/manifest.json"))
+          if any(
+              manifest.get("version") != linux_manifest.get("version")
+              for manifest in (linux_root_manifest, windows_root_manifest)
+          ):
+              raise SystemExit("El manifiesto de Chrome en la carpeta browser-bridge no coincide.")
           print(f"Paquetes verificados; puente local de Chrome {linux_manifest['version']} incluido.")
           PY
 

@@ -31,6 +31,9 @@ cp "$PROJECT_DIR/scripts/uninstall.ps1" "$PROJECT_DIR/scripts/build-chrome-unpac
 cp "$PROJECT_DIR/requirements.txt" "$PROJECT_DIR/README.md" "$PROJECT_DIR/LICENSE" "$STAGE/"
 python3 "$PROJECT_DIR/scripts/build-chrome-unpacked.py" \
   --output "$STAGE/browser-bridge/chrome-unpacked"
+# Keep the extracted release's browser-bridge directory directly loadable in
+# Chrome as well as providing the explicitly named unpacked extension folder.
+cp -a "$STAGE/browser-bridge/chrome-unpacked/." "$STAGE/browser-bridge/"
 find "$STAGE" -type d -name __pycache__ -prune -exec rm -rf -- {} +
 find "$STAGE" -type f \( -name '*.pyc' -o -name '*.bck' \) -delete
 

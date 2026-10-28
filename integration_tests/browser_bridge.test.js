@@ -746,6 +746,83 @@ test("background reads player data and browser cookies concurrently", async () =
   assert.equal((await responsePromise).ok, true);
 });
 
+test("anonymous format detection uses the current page response when the player response is stale", async () => {
+  let onMessage;
+  let sentPayload;
+  const pageUrl = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+  const currentResponse = {
+    videoDetails: { videoId: "dQw4w9WgXcQ", title: "Public video" },
+    streamingData: {
+      adaptiveFormats: [{
+        itag: 999,
+        url: "https://rr1---sn.googlevideo.com/videoplayback?itag=999",
+        mimeType: 'video/mp4; codecs="avc1.640033"',
+        width: 3840,
+        height: 2160,
+        audioTrack: { id: "en.1", displayName: "English", audioIsDefault: true },
+      }],
+      dashManifestUrl: "https://manifest.googlevideo.com/api/manifest/dash/video",
+    },
+  };
+  const stalePlayer = {
+    getPlayerResponse: () => ({
+      videoDetails: { videoId: "M7lc1UVf-VE", title: "Previous video" },
+      streamingData: {
+        formats: [{
+          itag: 18,
+          url: "https://rr1---sn.googlevideo.com/videoplayback?itag=18",
+          mimeType: 'video/mp4; codecs="avc1.42001E, mp4a.40.2"',
+          width: 640,
+          height: 360,
+        }],
+      },
+    }),
+  };
+  let playerAvailable = true;
+  const context = {
+    URL,
+    navigator: { userAgent: "Test browser", languages: ["en"] },
+    document: {
+      querySelector: selector => playerAvailable && selector === "ytd-player" ? stalePlayer : null,
+    },
+    window: { ytInitialPlayerResponse: currentResponse },
+    console: { warn: () => {} },
+    chrome: {
+      cookies: { getAll: async () => [] },
+      scripting: {
+        executeScript: async options => [{ result: options.func(...options.args) }],
+      },
+      runtime: { onMessage: { addListener: callback => { onMessage = callback; } } },
+    },
+    fetch: async (_url, options) => {
+      sentPayload = JSON.parse(options.body);
+      return { ok: true, json: async () => ({ status: "ready", formats: [] }) };
+    },
+  };
+  loadBackground(context);
+  const response = await new Promise(resolve => onMessage(
+    { type: "xdm-companion:get-formats", pageUrl },
+    { tab: { id: 7, url: pageUrl } },
+    resolve,
+  ));
+
+  assert.equal(response.ok, true);
+  assert.deepEqual(sentPayload.cookies, [], "public video detection also works without a login session");
+  assert.equal(sentPayload.youtube_playback.video_id, "dQw4w9WgXcQ");
+  assert.equal(sentPayload.youtube_playback.source_heights[0], 2160);
+  assert.equal(sentPayload.youtube_playback.formats[0].height, 2160);
+
+  playerAvailable = false;
+  const globalOnlyResponse = await new Promise(resolve => onMessage(
+    { type: "xdm-companion:get-formats", pageUrl },
+    { tab: { id: 7, url: pageUrl } },
+    resolve,
+  ));
+  assert.equal(globalOnlyResponse.ok, true);
+  assert.equal(sentPayload.youtube_playback.video_id, "dQw4w9WgXcQ");
+  assert.equal(sentPayload.youtube_playback.source_heights[0], 2160);
+});
+
 test("background rejects unsupported pages before contacting the local service", async () => {
   let onMessage;
   let requestCount = 0;

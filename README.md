@@ -30,4 +30,4 @@ The installer prepares the background service, verifies the downloaded package, 
 
 ## Load a local Chrome build
 
-For local testing, run `python3 scripts/build-chrome-unpacked.py` from the project directory. In Chrome, open `chrome://extensions`, enable **Developer mode**, choose **Load unpacked**, and select `dist/local/xdm-companion-chrome-unpacked`. Select the folder that contains `manifest.json`; the source folder `browser-bridge` contains templates and is not loadable directly.
+For local testing from a source checkout, run `python3 scripts/build-chrome-unpacked.py`. In Chrome, open `chrome://extensions`, enable **Developer mode**, choose **Load unpacked**, and select `dist/local/xdm-companion-chrome-unpacked`. In an extracted Linux or Windows release package, select its `browser-bridge` folder. Select a folder that contains `manifest.json` at its root.

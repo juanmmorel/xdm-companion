@@ -20,18 +20,74 @@ function collectPlayerData(expectedVideoId, playerConfig) {
   const selectors = Array.isArray(playerConfig.selectors) ? playerConfig.selectors : [];
   let player = null;
   for (const selector of selectors) {
-    player = document.querySelector(selector);
+    try { player = document.querySelector(selector); } catch (_) { player = null; }
     if (player) break;
   }
-  if (!player) return { playback: null, diagnostics };
-  diagnostics.player_found = true;
-
+  diagnostics.player_found = Boolean(player);
   const responseName = String(playerConfig.response_global || "");
-  const response = player.getPlayerResponse?.()
-    || (responseName ? window[responseName] : null);
-  if (!response || typeof response !== "object") return { playback: null, diagnostics };
+  const candidates = [];
+  const addCandidate = response => {
+    if (response && typeof response === "object" && !candidates.includes(response)) {
+      candidates.push(response);
+    }
+  };
+  if (typeof player?.getPlayerResponse === "function") {
+    try { addCandidate(player.getPlayerResponse()); } catch (_) {}
+  }
+  if (responseName) {
+    try { addCandidate(window[responseName]); } catch (_) {}
+  }
+  if (!candidates.length) return { playback: null, diagnostics };
   diagnostics.response_found = true;
-  const videoId = String(response?.videoDetails?.videoId || "");
+
+  const responseVideoId = response => String(response?.videoDetails?.videoId || "");
+  const matchingCandidates = candidates.filter(response => {
+    const candidateId = responseVideoId(response);
+    return !expectedVideoId || !candidateId || candidateId === expectedVideoId;
+  });
+  if (!matchingCandidates.length) {
+    diagnostics.video_id_matches = false;
+    return { playback: null, diagnostics };
+  }
+  const responseScore = response => {
+    const data = response?.streamingData || {};
+    const formats = [
+      ...(Array.isArray(data.formats) ? data.formats : []),
+      ...(Array.isArray(data.adaptiveFormats) ? data.adaptiveFormats : []),
+    ];
+    const videoFormats = formats.filter(format =>
+      String(format?.mimeType || "").toLowerCase().startsWith("video/"),
+    );
+    const maxHeight = videoFormats.reduce((highest, format) => {
+      const height = Number(format?.height);
+      return Math.max(highest, Number.isFinite(height) && height > 0 ? height : 0);
+    }, 0);
+    const directFormats = videoFormats.filter(format =>
+      Boolean(format?.url) && !format?.signatureCipher && !format?.cipher
+      && !format?.drmFamilies?.length,
+    ).length;
+    const exactVideoId = expectedVideoId
+      && responseVideoId(response) === expectedVideoId ? 1 : 0;
+    return [
+      exactVideoId,
+      maxHeight,
+      directFormats,
+      videoFormats.length,
+      formats.length,
+      data.dashManifestUrl ? 1 : 0,
+    ];
+  };
+  const compareScores = (left, right) => {
+    for (let index = 0; index < left.length; index += 1) {
+      if (left[index] !== right[index]) return right[index] - left[index];
+    }
+    return 0;
+  };
+  matchingCandidates.sort((left, right) =>
+    compareScores(responseScore(left), responseScore(right)),
+  );
+  const response = matchingCandidates[0];
+  const videoId = responseVideoId(response);
   diagnostics.video_id_matches = !expectedVideoId || !videoId || expectedVideoId === videoId;
   if (!diagnostics.video_id_matches) return { playback: null, diagnostics };
 
@@ -71,7 +127,7 @@ function collectPlayerData(expectedVideoId, playerConfig) {
   diagnostics.formats = Array.isArray(streaming?.formats) ? streaming.formats.length : 0;
   diagnostics.adaptive_formats = Array.isArray(streaming?.adaptiveFormats)
     ? streaming.adaptiveFormats.length : 0;
-  const current = player.getAudioTrack?.();
+  const current = player?.getAudioTrack?.();
   let available = [];
   try { available = Array.from(player.getAvailableAudioTracks?.() || []); } catch (_) {}
   const captionAudioTracks = response?.captions?.playerCaptionsTracklistRenderer?.audioTracks || [];
@@ -116,7 +172,10 @@ function collectPlayerData(expectedVideoId, playerConfig) {
     Boolean(format?.drmFamilies?.length),
   ).length;
   const sourceHeights = [...new Set(videoFormats
-    .map(format => Number(format.height) || 0)
+    .map(format => {
+      const height = Number(format.height);
+      return Number.isFinite(height) && height > 0 ? Math.trunc(height) : 0;
+    })
     .filter(height => height > 0))]
     .sort((left, right) => right - left);
   diagnostics.source_heights = sourceHeights;
