@@ -5,6 +5,10 @@ import sys
 import shutil
 import re
 import json
+import hashlib
+import tarfile
+import tempfile
+import urllib.request
 
 from browser_bridge import install_linux_browser_bridges
 
@@ -242,49 +246,129 @@ def get_supported_js_runtime():
   return None
 
 
-def install_apt_venv_support():
-  """Install Ubuntu/Debian's version-matched venv package when requested."""
-  apt_get = shutil.which("apt-get")
-  if not apt_get:
-    return False
+def find_user_uv():
+  runtime_uv = os.path.join(get_xdm_config_dir(), "runtime", "uv")
+  for candidate in (shutil.which("uv"), runtime_uv):
+    if not candidate or not os.path.isfile(candidate):
+      continue
+    try:
+      subprocess.run(
+          [candidate, "--version"],
+          capture_output=True,
+          text=True,
+          timeout=5,
+          check=True,
+      )
+      return candidate
+    except (OSError, subprocess.SubprocessError):
+      continue
+  return None
 
-  package = f"python{sys.version_info.major}.{sys.version_info.minor}-venv"
-  if hasattr(os, "geteuid") and os.geteuid() == 0:
-    prefix = []
-  else:
-    sudo = shutil.which("sudo")
-    if not sudo:
-      return False
-    prefix = [sudo]
 
-  if not sys.stdin.isatty():
-    print(
-        f"[!] Falta el soporte de entornos virtuales. Instálalo y vuelve a ejecutar:\n"
-        f"    sudo apt-get update && sudo apt-get install -y {package}"
-    )
-    return False
+def install_user_uv():
+  """Download the signed-by-checksum uv release into this user's XDM directory."""
+  machine = platform.machine().lower()
+  targets = {
+      "x86_64": "x86_64-unknown-linux-gnu",
+      "amd64": "x86_64-unknown-linux-gnu",
+      "aarch64": "aarch64-unknown-linux-gnu",
+      "arm64": "aarch64-unknown-linux-gnu",
+  }
+  target = targets.get(machine)
+  if not target:
+    raise SystemExit(f"[!] No hay un paquete de uv para la arquitectura {machine}.")
 
-  answer = input(
-      f"[*] Falta {package}; ¿quieres que lo instale con apt? [S/n] "
-  ).strip().lower()
-  if answer and answer not in ("s", "si", "sí", "y", "yes"):
-    return False
+  api_url = "https://api.github.com/repos/astral-sh/uv/releases/latest"
+  request = urllib.request.Request(
+      api_url,
+      headers={
+          "Accept": "application/vnd.github+json",
+          "User-Agent": "XDM-Companion-Installer",
+      },
+  )
+  try:
+    with urllib.request.urlopen(request, timeout=30) as response:
+      release = json.loads(response.read().decode("utf-8"))
+  except (OSError, ValueError) as error:
+    raise SystemExit(f"[!] No se pudo consultar la versión oficial de uv: {error}") from error
 
-  print("[*] Actualizando el índice de paquetes de apt...")
-  update = subprocess.run([*prefix, apt_get, "update"], check=False)
-  if update.returncode != 0:
-    print("[!] No se pudo actualizar el índice de paquetes de apt.")
-    return False
+  tag = str(release.get("tag_name") or "")
+  if (
+      not re.fullmatch(r"v?\d+\.\d+\.\d+", tag)
+      or release.get("draft")
+      or release.get("prerelease")
+  ):
+    raise SystemExit("[!] GitHub no devolvió una release estable válida de uv.")
 
-  for candidate in (package, "python3-venv"):
-    print(f"[*] Instalando {candidate}...")
-    result = subprocess.run(
-        [*prefix, apt_get, "install", "-y", candidate],
-        check=False,
-    )
-    if result.returncode == 0:
-      return True
-  return False
+  asset_name = f"uv-{target}.tar.gz"
+  checksum_name = f"{asset_name}.sha256"
+  base_url = f"https://github.com/astral-sh/uv/releases/download/{tag}/"
+  assets = {
+      item.get("name"): item
+      for item in release.get("assets", [])
+      if isinstance(item, dict)
+  }
+  urls = []
+  for name in (asset_name, checksum_name):
+    asset = assets.get(name)
+    url = str(asset.get("browser_download_url") or "") if asset else ""
+    if not url.startswith(base_url) or url.rsplit("/", 1)[-1] != name:
+      raise SystemExit(f"La release de uv no contiene el archivo oficial {name}.")
+    if int(asset.get("size") or 0) > 128 * 1024 * 1024:
+      raise SystemExit(f"El archivo oficial de uv excede el tamaño permitido: {name}.")
+    urls.append(url)
+
+  print(f"[*] Preparando uv {tag} en la carpeta del usuario, sin permisos de administrador.")
+  with tempfile.TemporaryDirectory(prefix="xdm-companion-uv-") as temp_dir:
+    archive_path = os.path.join(temp_dir, asset_name)
+    checksum_path = os.path.join(temp_dir, checksum_name)
+    try:
+      for url, destination in zip(urls, (archive_path, checksum_path)):
+        with urllib.request.urlopen(url, timeout=120) as response, open(destination, "wb") as output:
+          shutil.copyfileobj(response, output)
+    except OSError as error:
+      raise SystemExit(f"[!] No se pudo descargar uv desde su release oficial: {error}") from error
+
+    with open(checksum_path, encoding="utf-8") as checksum_file:
+      checksum_parts = checksum_file.read().strip().split()
+    if (
+        not checksum_parts
+        or not re.fullmatch(r"[0-9a-fA-F]{64}", checksum_parts[0])
+        or (len(checksum_parts) > 1 and checksum_parts[-1].lstrip("*") != asset_name)
+    ):
+      raise SystemExit("[!] El checksum de uv tiene un formato no válido.")
+    with open(archive_path, "rb") as archive_file:
+      archive_digest = hashlib.sha256()
+      for chunk in iter(lambda: archive_file.read(1024 * 1024), b""):
+        archive_digest.update(chunk)
+    digest = archive_digest.hexdigest()
+    if digest.lower() != checksum_parts[0].lower():
+      raise SystemExit("[!] El checksum SHA-256 del paquete oficial de uv no coincide.")
+
+    uv_member = None
+    with tarfile.open(archive_path, "r:gz") as archive:
+      candidates = [
+          member
+          for member in archive.getmembers()
+          if member.isfile() and member.name.rsplit("/", 1)[-1] == "uv"
+      ]
+      if len(candidates) != 1 or candidates[0].size > 128 * 1024 * 1024:
+        raise SystemExit("El archivo oficial de uv no contiene el ejecutable esperado.")
+      uv_member = archive.extractfile(candidates[0])
+      if uv_member is None:
+        raise SystemExit("No se pudo leer el ejecutable uv del archivo oficial.")
+      runtime_dir = os.path.join(get_xdm_config_dir(), "runtime")
+      os.makedirs(runtime_dir, exist_ok=True)
+      staged_uv = os.path.join(temp_dir, "uv")
+      with uv_member, open(staged_uv, "wb") as output:
+        shutil.copyfileobj(uv_member, output)
+
+    os.chmod(staged_uv, 0o755)
+    installed_uv = os.path.join(runtime_dir, "uv")
+    shutil.copy2(staged_uv, installed_uv)
+    os.chmod(installed_uv, 0o755)
+
+  return installed_uv
 
 
 def create_production_venv(prod_venv_dir, system):
@@ -293,40 +377,27 @@ def create_production_venv(prod_venv_dir, system):
   if result.returncode == 0:
     if result.stdout:
       print(result.stdout, end="")
-    return
+    return None
 
   error_output = "\n".join(part for part in (result.stdout, result.stderr) if part)
-  lower_error = error_output.lower()
-  missing_venv_support = (
-      "ensurepip" in lower_error
-      or ("no module named" in lower_error and "venv" in lower_error)
-  )
-  if system == "Linux" and missing_venv_support and shutil.which("apt-get"):
-    versioned_package = (
-        f"python{sys.version_info.major}.{sys.version_info.minor}-venv"
-    )
-    print(
-        f"[!] Python no tiene ensurepip; Ubuntu/Debian necesita {versioned_package}."
-    )
-    if install_apt_venv_support():
-      if os.path.exists(prod_venv_dir):
-        shutil.rmtree(prod_venv_dir)
-      print("[*] Reintentando la creación del entorno virtual...")
-      retry = subprocess.run(command, check=False)
-      if retry.returncode == 0:
-        return
-      raise SystemExit(
-          "[!] Python sigue sin poder crear el entorno virtual. Comprueba la salida "
-          "del sistema e instala los requisitos de Python para esta distribución."
-      )
-
+  if system == "Linux":
     if os.path.exists(prod_venv_dir):
       shutil.rmtree(prod_venv_dir)
-    raise SystemExit(
-        f"[!] No se pudo preparar el entorno virtual. Instala el paquete "
-        f"{versioned_package} y vuelve a ejecutar el instalador. Comando: "
-        f"sudo apt-get update && sudo apt-get install -y {versioned_package}"
+    print("[*] Python no incluye ensurepip; usaré uv dentro de la carpeta del usuario.")
+    uv_path = find_user_uv() or install_user_uv()
+    uv_result = subprocess.run(
+        [uv_path, "venv", "--seed", "--python", sys.executable, prod_venv_dir],
+        capture_output=True,
+        text=True,
+        check=False,
     )
+    if uv_result.returncode != 0:
+      detail = (uv_result.stderr or uv_result.stdout or "").strip()
+      raise SystemExit(
+          "[!] No se pudo crear el entorno virtual en la carpeta del usuario."
+          + (f"\n{detail}" if detail else "")
+      )
+    return uv_path
 
   if error_output:
     print(error_output, file=sys.stderr)
@@ -361,28 +432,40 @@ def main():
   else:
     python_env = os.path.join(prod_venv_dir, "bin", "python")
 
+  uv_path = None
   if not os.path.isfile(python_env):
     if os.path.exists(prod_venv_dir):
       print("[!] Se encontró un entorno virtual incompleto; se va a reconstruir.")
       shutil.rmtree(prod_venv_dir)
     print("[*] Creando entorno virtual de producción...")
-    create_production_venv(prod_venv_dir, system)
+    uv_path = create_production_venv(prod_venv_dir, system)
   if not os.path.isfile(python_env):
     raise SystemExit("[!] No se pudo crear el entorno virtual de XDM Companion.")
 
   # 2. Resolver pip desde el intérprete del entorno y evitar actualizar pip
   # por separado en cada reinstalación.
   print("[*] Instalando dependencias en el entorno de producción...")
-  run_command([
-      python_env,
-      "-m",
-      "pip",
-      "install",
-      "--disable-pip-version-check",
-      "--no-input",
-      "-r",
-      os.path.join(PROJECT_DIR, "requirements.txt"),
-  ])
+  if uv_path:
+    run_command([
+        uv_path,
+        "pip",
+        "install",
+        "--python",
+        python_env,
+        "-r",
+        os.path.join(PROJECT_DIR, "requirements.txt"),
+    ])
+  else:
+    run_command([
+        python_env,
+        "-m",
+        "pip",
+        "install",
+        "--disable-pip-version-check",
+        "--no-input",
+        "-r",
+        os.path.join(PROJECT_DIR, "requirements.txt"),
+    ])
 
   # 3. Copiar el código fuente 'core' y 'domains.json' a la carpeta de XDM
   core_dst = os.path.join(xdm_config_dir, "core")

@@ -1,10 +1,14 @@
 import json
+import hashlib
+import io
 import os
 import shutil
 import sys
+import tarfile
 import threading
 import zipfile
 from types import SimpleNamespace
+import pytest
 
 sys.path.insert(
     0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../installer"))
@@ -253,6 +257,91 @@ def test_windows_installer_is_ready_when_service_runtime_is_available():
 
   assert install.installation_ready(runtime, [], "Windows")
   assert not install.installation_ready(None, [], "Windows")
+
+
+def test_linux_chrome_external_registration_uses_the_users_config_directory(tmp_path):
+  directory = browser_bridge.chrome_external_extension_directory(
+      "/opt/google/chrome/chrome",
+      home_dir=tmp_path,
+  )
+
+  assert directory == tmp_path / ".config/google-chrome/External Extensions"
+
+
+def test_chromium_system_registration_is_rejected_without_requesting_admin():
+  with pytest.raises(browser_bridge.BrowserBridgeError, match="no solicitará permisos"):
+    browser_bridge.chrome_external_extension_directory("/usr/lib/chromium/chromium")
+
+
+def test_linux_uses_user_uv_when_python_venv_support_is_missing(tmp_path, monkeypatch):
+  calls = []
+  uv_path = str(tmp_path / "runtime" / "uv")
+
+  def fake_run(command, **kwargs):
+    calls.append(command)
+    if command[1:3] == ["-m", "venv"]:
+      return SimpleNamespace(returncode=1, stdout="", stderr="ensurepip is not available")
+    return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+  monkeypatch.setattr(install.subprocess, "run", fake_run)
+  monkeypatch.setattr(install, "find_user_uv", lambda: uv_path)
+
+  target = str(tmp_path / "companion" / "venv")
+  assert install.create_production_venv(target, "Linux") == uv_path
+  assert calls[1] == [uv_path, "venv", "--seed", "--python", sys.executable, target]
+
+
+def test_user_uv_download_validates_checksum_and_installs_into_companion_runtime(
+    tmp_path, monkeypatch
+):
+  target_name = "uv-x86_64-unknown-linux-gnu.tar.gz"
+  executable = b"fake-uv-binary"
+  archive_buffer = io.BytesIO()
+  with tarfile.open(fileobj=archive_buffer, mode="w:gz") as archive:
+    member = tarfile.TarInfo("uv-x86_64-unknown-linux-gnu/uv")
+    member.mode = 0o755
+    member.size = len(executable)
+    archive.addfile(member, io.BytesIO(executable))
+  archive_bytes = archive_buffer.getvalue()
+  checksum_bytes = f"{hashlib.sha256(archive_bytes).hexdigest()}  {target_name}\n".encode()
+  tag = "0.0.1"
+  base_url = f"https://github.com/astral-sh/uv/releases/download/{tag}/"
+  release = {
+      "tag_name": tag,
+      "draft": False,
+      "prerelease": False,
+      "assets": [
+          {"name": target_name, "browser_download_url": base_url + target_name, "size": len(archive_bytes)},
+          {"name": target_name + ".sha256", "browser_download_url": base_url + target_name + ".sha256", "size": len(checksum_bytes)},
+      ],
+  }
+  responses = {
+      "https://api.github.com/repos/astral-sh/uv/releases/latest": json.dumps(release).encode(),
+      base_url + target_name: archive_bytes,
+      base_url + target_name + ".sha256": checksum_bytes,
+  }
+
+  class FakeResponse(io.BytesIO):
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *_args):
+      self.close()
+
+  def fake_urlopen(request, timeout):
+    url = request.full_url if hasattr(request, "full_url") else request
+    assert timeout in (30, 120)
+    return FakeResponse(responses[url])
+
+  monkeypatch.setattr(install.platform, "machine", lambda: "x86_64")
+  monkeypatch.setattr(install, "get_xdm_config_dir", lambda: str(tmp_path / "companion"))
+  monkeypatch.setattr(install.urllib.request, "urlopen", fake_urlopen)
+
+  installed = install.install_user_uv()
+
+  assert installed == str(tmp_path / "companion/runtime/uv")
+  assert (tmp_path / "companion/runtime/uv").read_bytes() == executable
+  assert (tmp_path / "companion/runtime/uv").stat().st_mode & 0o777 == 0o755
 
 
 def test_systemd_user_environment_recovers_standard_runtime_and_bus(monkeypatch):

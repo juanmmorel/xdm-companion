@@ -2,6 +2,7 @@
 
 import json
 import hashlib
+import os
 import re
 import shutil
 import stat
@@ -206,13 +207,26 @@ def find_chrome_binary(which=shutil.which):
   return None
 
 
-def chrome_external_extension_directory(chrome_binary):
+def chrome_external_extension_directory(chrome_binary, home_dir=None, config_home=None):
   binary = Path(chrome_binary).resolve()
   path_parts = binary.parts
   if len(path_parts) >= 4 and path_parts[1:3] == ("opt", "google"):
-    return binary.parent / "extensions"
+    channel = binary.parent.name
+    app_name = {
+        "chrome-beta": "google-chrome-beta",
+        "chrome-unstable": "google-chrome-unstable",
+    }.get(channel, "google-chrome")
+    config_dir = (
+        Path(config_home)
+        if config_home
+        else Path(os.environ.get("XDG_CONFIG_HOME") or Path(home_dir or Path.home()) / ".config")
+    )
+    return config_dir / app_name / "External Extensions"
   if "chromium" in binary.parent.name:
-    return Path("/usr/share/chromium/extensions")
+    raise BrowserBridgeError(
+        "Esta compilación de Chromium no ofrece un registro externo por usuario; "
+        "el instalador no solicitará permisos de administrador."
+    )
   raise BrowserBridgeError(f"No reconozco la ubicación de instalación de Chrome: {binary}")
 
 
@@ -279,16 +293,10 @@ def _write_system_file(destination, contents, runner=subprocess.run):
       temp_destination.chmod(0o644)
       temp_destination.replace(destination)
     else:
-      pkexec = shutil.which("pkexec")
-      if not pkexec:
-        raise BrowserBridgeError("Se requieren permisos de administrador para configurar Firefox.")
-      result = runner(
-          [pkexec, "install", "-D", "-m", "0644", str(source), str(destination)],
-          check=False,
-          timeout=120,
+      raise BrowserBridgeError(
+          "La política de Firefox está en una carpeta protegida; "
+          "el instalador no solicitará permisos de administrador."
       )
-      if result.returncode != 0:
-        raise BrowserBridgeError("No se pudo configurar la política de instalación de Firefox.")
   finally:
     source.unlink(missing_ok=True)
 
@@ -300,13 +308,10 @@ def remove_chrome_external_manifest(manifest_path, runner=subprocess.run):
   if _can_write(manifest_path.parent):
     manifest_path.unlink()
     return True
-  pkexec = shutil.which("pkexec")
-  if not pkexec:
-    raise BrowserBridgeError("Se requieren permisos de administrador para retirar el puente de Chrome.")
-  result = runner([pkexec, "rm", "-f", str(manifest_path)], check=False, timeout=120)
-  if result.returncode != 0:
-    raise BrowserBridgeError("No se pudo retirar el registro del puente de Chrome.")
-  return True
+  raise BrowserBridgeError(
+      "El registro antiguo de Chrome está en una carpeta protegida; "
+      "el desinstalador no solicitará permisos de administrador."
+  )
 
 
 def _remove_system_file(path, runner=subprocess.run):
@@ -314,12 +319,10 @@ def _remove_system_file(path, runner=subprocess.run):
   if _can_write(path.parent):
     path.unlink(missing_ok=True)
     return
-  pkexec = shutil.which("pkexec")
-  if not pkexec:
-    raise BrowserBridgeError("Se requieren permisos de administrador para retirar la política de Firefox.")
-  result = runner([pkexec, "rm", "-f", str(path)], check=False, timeout=120)
-  if result.returncode != 0:
-    raise BrowserBridgeError("No se pudo retirar la política de Firefox.")
+  raise BrowserBridgeError(
+      "La política antigua de Firefox está en una carpeta protegida; "
+      "el desinstalador no solicitará permisos de administrador."
+  )
 
 
 def firefox_install_xpi_path(home_dir=None):
@@ -455,19 +458,10 @@ def write_chrome_external_manifest(extension_id, crx_path, version, install_dir,
       shutil.copy2(temp_manifest, destination)
       destination.chmod(0o644)
     else:
-      pkexec = shutil.which("pkexec")
-      if not pkexec:
-        raise BrowserBridgeError(
-            "Chrome requiere registrar el puente en su carpeta de extensiones del sistema; "
-            "pkexec no está disponible para autorizarlo."
-        )
-      result = runner(
-          [pkexec, "install", "-D", "-m", "0644", str(temp_manifest), str(destination)],
-          check=False,
-          timeout=120,
+      raise BrowserBridgeError(
+          "No se puede escribir el registro en una carpeta del usuario; "
+          "el instalador no solicitará permisos de administrador."
       )
-      if result.returncode != 0:
-        raise BrowserBridgeError("No se pudo registrar el puente automáticamente en Chrome.")
   finally:
     temp_manifest.unlink(missing_ok=True)
   return destination

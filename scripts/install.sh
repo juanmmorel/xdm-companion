@@ -14,7 +14,6 @@ REPOSITORY="${XDM_COMPANION_REPOSITORY:-}"
 REMOTE_INSTALL="false"
 [[ -z "$REPOSITORY" ]] || REMOTE_INSTALL="true"
 RELEASE_VERSION="latest"
-ASSUME_YES="false"
 DO_UNINSTALL="false"
 PYTHON_BIN="${XDM_COMPANION_PYTHON:-python3}"
 WORK_DIR=""
@@ -48,7 +47,7 @@ Uso:
 Opciones:
   --repo OWNER/REPO   Repositorio de GitHub
   --version TAG       Release que se instalará; por defecto, la última release estable
-  --yes               Instalar dependencias del sistema sin preguntar
+  --yes               Alias de compatibilidad; no solicita permisos de administrador
   --uninstall         Ejecutar el desinstalador instalado
   --help              Mostrar esta ayuda
 
@@ -83,7 +82,6 @@ while (($#)); do
       shift 2
       ;;
     --yes|-y)
-      ASSUME_YES="true"
       shift
       ;;
     --uninstall)
@@ -115,50 +113,8 @@ install_missing_dependencies() {
     command -v "$command_name" >/dev/null 2>&1 || missing+=("$command_name")
   done
   command -v "$PYTHON_BIN" >/dev/null 2>&1 || missing+=("python3")
-  if command -v "$PYTHON_BIN" >/dev/null 2>&1; then
-    local venv_probe_dir
-    venv_probe_dir="$(mktemp -d "${TMPDIR:-/tmp}/xdm-companion-venv-check.XXXXXXXX")"
-    if ! "$PYTHON_BIN" -m venv "$venv_probe_dir/env" >/dev/null 2>&1; then
-      missing+=("python3-venv")
-    fi
-    rm -rf -- "$venv_probe_dir"
-  fi
   ((${#missing[@]} == 0)) && return 0
-
-  local package_manager="" packages=()
-  if command -v apt-get >/dev/null 2>&1; then
-    package_manager="apt-get"
-    packages=(curl tar coreutils python3 python3-venv)
-  elif command -v dnf >/dev/null 2>&1; then
-    package_manager="dnf"
-    packages=(curl tar coreutils python3)
-  elif command -v pacman >/dev/null 2>&1; then
-    package_manager="pacman"
-    packages=(curl tar coreutils python)
-  else
-    fail "Faltan herramientas (${missing[*]}) y no se detectó apt, dnf ni pacman. Instálalas y vuelve a intentarlo."
-  fi
-
-  if [[ "$ASSUME_YES" != "true" ]]; then
-    local answer
-    read -r -p "Faltan ${missing[*]}. ¿Instalar dependencias del sistema? [S/n] " answer || true
-    answer="${answer:-S}"
-    [[ "$answer" =~ ^[SsYy] ]] || fail "Instala las dependencias indicadas y vuelve a ejecutar el instalador."
-  fi
-  command -v sudo >/dev/null 2>&1 || fail "Se necesita sudo para instalar: ${packages[*]}"
-  sudo -v
-  case "$package_manager" in
-    apt-get)
-      sudo apt-get update
-      sudo apt-get install -y "${packages[@]}"
-      ;;
-    dnf)
-      sudo dnf install -y "${packages[@]}"
-      ;;
-    pacman)
-      sudo pacman -Sy --needed --noconfirm "${packages[@]}"
-      ;;
-  esac
+  fail "Faltan herramientas necesarias (${missing[*]}). Instálalas en el sistema y vuelve a ejecutar el instalador; XDM Companion no solicitará credenciales de administrador."
 }
 
 install_missing_dependencies
