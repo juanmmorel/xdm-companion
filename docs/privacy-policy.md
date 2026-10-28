@@ -19,6 +19,3 @@ La detección y precarga se realizan en los sitios configurados para que el sele
 ## Seguridad
 
 El servicio local escucha solo en `127.0.0.1`. El puente limita la comunicación a ese servicio y el servicio valida el origen del complemento y el sitio configurado antes de procesar la solicitud. Mantén actualizado el navegador, XDM y XDM Companion.
-
-
-al
