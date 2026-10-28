@@ -8,7 +8,7 @@ from browser_bridge import uninstall_linux_browser_bridges
 
 def run_command(cmd):
   try:
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, capture_output=True, text=True)
   except Exception:
     pass
 
@@ -32,6 +32,16 @@ def main():
     service_path = os.path.join(
         home_dir, ".config", "systemd", "user", "xdm-companion.service"
     )
+    wants_link = os.path.join(
+        home_dir,
+        ".config",
+        "systemd",
+        "user",
+        "default.target.wants",
+        "xdm-companion.service",
+    )
+    if os.path.lexists(wants_link) and os.path.islink(wants_link):
+      os.remove(wants_link)
     if os.path.exists(service_path):
       os.remove(service_path)
       run_command(["systemctl", "--user", "daemon-reload"])

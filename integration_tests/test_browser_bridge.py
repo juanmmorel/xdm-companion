@@ -255,6 +255,66 @@ def test_windows_installer_is_ready_when_service_runtime_is_available():
   assert not install.installation_ready(None, [], "Windows")
 
 
+def test_systemd_user_environment_recovers_standard_runtime_and_bus(monkeypatch):
+  runtime_dir = "/run/user/4242"
+  monkeypatch.setattr(install.os.path, "isdir", lambda path: path == runtime_dir)
+  monkeypatch.setattr(
+      install.os.path,
+      "exists",
+      lambda path: path == os.path.join(runtime_dir, "bus"),
+  )
+
+  environment = install.systemd_user_environment({}, uid=4242)
+
+  assert environment["XDG_RUNTIME_DIR"] == runtime_dir
+  assert environment["DBUS_SESSION_BUS_ADDRESS"] == f"unix:path={runtime_dir}/bus"
+
+
+def test_systemd_user_service_is_enabled_for_the_next_login_without_a_bus(
+    tmp_path, monkeypatch
+):
+  service_dir = tmp_path / ".config/systemd/user"
+  service_dir.mkdir(parents=True)
+  service_path = service_dir / "xdm-companion.service"
+  service_path.write_text("[Unit]\nDescription=XDM Companion\n")
+  monkeypatch.setattr(install, "systemd_user_environment", lambda: {})
+
+  assert not install.configure_systemd_user_service(str(service_path))
+
+  link_path = service_dir / "default.target.wants/xdm-companion.service"
+  assert link_path.is_symlink()
+  assert link_path.resolve() == service_path.resolve()
+
+
+def test_systemd_user_service_uses_recovered_session_environment(tmp_path, monkeypatch):
+  service_dir = tmp_path / ".config/systemd/user"
+  service_dir.mkdir(parents=True)
+  service_path = service_dir / "xdm-companion.service"
+  service_path.write_text("[Unit]\nDescription=XDM Companion\n")
+  environment = {
+      "XDG_RUNTIME_DIR": "/run/user/4242",
+      "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/4242/bus",
+  }
+  calls = []
+
+  def fake_run(command, **kwargs):
+    calls.append((command, kwargs["env"]))
+    return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+  monkeypatch.setattr(install, "systemd_user_environment", lambda: environment)
+  monkeypatch.setattr(install.subprocess, "run", fake_run)
+
+  assert install.configure_systemd_user_service(str(service_path))
+  assert [command[0][2:] for command in calls] == [
+      ["daemon-reload"],
+      ["reset-failed", "xdm-companion.service"],
+      ["enable", "xdm-companion.service"],
+      ["restart", "xdm-companion.service"],
+      ["is-active", "--quiet", "xdm-companion.service"],
+  ]
+  assert all(call_environment is environment for _, call_environment in calls)
+
+
 def test_linux_installer_copies_signed_firefox_xpi_to_policy_accessible_path(tmp_path, monkeypatch):
   monkeypatch.setattr(browser_bridge, "find_chrome_binary", lambda: None)
   monkeypatch.setattr(browser_bridge, "contains_firefox_signature_metadata", lambda _path: True)

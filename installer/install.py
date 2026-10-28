@@ -96,6 +96,128 @@ def installation_ready(js_runtime, browser_statuses, system=None):
   return bool(js_runtime) and browser_setup_ready
 
 
+class SystemdUserBusUnavailable(RuntimeError):
+  pass
+
+
+def systemd_user_environment(environment=None, uid=None):
+  """Recover the standard user-bus environment when the installer lacks it."""
+  resolved = dict(os.environ if environment is None else environment)
+  if uid is None:
+    uid = os.getuid()
+
+  runtime_dir = resolved.get("XDG_RUNTIME_DIR") or f"/run/user/{uid}"
+  if not resolved.get("XDG_RUNTIME_DIR") and os.path.isdir(runtime_dir):
+    resolved["XDG_RUNTIME_DIR"] = runtime_dir
+  if not resolved.get("DBUS_SESSION_BUS_ADDRESS"):
+    bus_socket = os.path.join(runtime_dir, "bus")
+    if os.path.exists(bus_socket):
+      resolved["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus_socket}"
+  return resolved
+
+
+def enable_systemd_user_service(service_path):
+  wants_dir = os.path.join(os.path.dirname(service_path), "default.target.wants")
+  os.makedirs(wants_dir, exist_ok=True)
+  link_path = os.path.join(wants_dir, os.path.basename(service_path))
+  relative_target = os.path.relpath(service_path, wants_dir)
+  if os.path.lexists(link_path):
+    if os.path.islink(link_path) and os.path.realpath(link_path) == os.path.realpath(service_path):
+      return
+    if os.path.isdir(link_path) and not os.path.islink(link_path):
+      raise SystemExit(
+          f"[!] No se puede habilitar el servicio: {link_path} ya existe como directorio."
+      )
+    os.remove(link_path)
+  os.symlink(relative_target, link_path)
+
+
+def run_systemctl_user(arguments, environment, allow_failure=False):
+  command = ["systemctl", "--user", *arguments]
+  print(f"[*] Ejecutando: {' '.join(command)}")
+  result = subprocess.run(
+      command,
+      capture_output=True,
+      text=True,
+      env=environment,
+      check=False,
+  )
+  output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+  if result.returncode != 0:
+    lower_output = output.lower()
+    bus_errors = (
+        "failed to connect to user scope bus",
+        "failed to connect to bus",
+        "dbus_session_bus_address",
+        "xdg_runtime_dir",
+        "no medium found",
+    )
+    if any(marker in lower_output for marker in bus_errors):
+      raise SystemdUserBusUnavailable(output)
+    if arguments[:1] == ["reset-failed"] and "not loaded" in lower_output:
+      return result
+    if allow_failure:
+      if output:
+        print(output, file=sys.stderr)
+      return result
+    raise SystemExit(
+        f"[!] Falló {' '.join(command)} (código {result.returncode})."
+        + (f"\n{output}" if output else "")
+    )
+  if output:
+    print(output)
+  return result
+
+
+def configure_systemd_user_service(service_path):
+  environment = systemd_user_environment()
+  has_user_bus = bool(
+      environment.get("XDG_RUNTIME_DIR")
+      and environment.get("DBUS_SESSION_BUS_ADDRESS")
+  )
+  if not has_user_bus:
+    enable_systemd_user_service(service_path)
+    print(
+        "[!] No hay una sesión D-Bus de usuario activa. El servicio quedó "
+        "habilitado y arrancará al iniciar sesión en Ubuntu."
+    )
+    return False
+
+  try:
+    run_systemctl_user(["daemon-reload"], environment)
+    reset_result = run_systemctl_user(
+        ["reset-failed", "xdm-companion.service"], environment, allow_failure=True
+    )
+    if reset_result.returncode != 0:
+      print("[!] No se pudo limpiar el estado anterior de systemd; continuaré con el reinicio.")
+    run_systemctl_user(["enable", "xdm-companion.service"], environment)
+    run_systemctl_user(["restart", "xdm-companion.service"], environment)
+    service_status = run_systemctl_user(
+        ["is-active", "--quiet", "xdm-companion.service"],
+        environment,
+        allow_failure=True,
+    )
+    if service_status.returncode != 0:
+      run_systemctl_user(
+          ["--no-pager", "--full", "status", "xdm-companion.service"],
+          environment,
+          allow_failure=True,
+      )
+      raise SystemExit(
+          "[!] El servicio XDM Companion no quedó activo. El estado de systemd anterior muestra el motivo."
+      )
+  except SystemdUserBusUnavailable:
+    enable_systemd_user_service(service_path)
+    print(
+        "[!] Se perdió la conexión con D-Bus de usuario. El servicio quedó "
+        "habilitado y arrancará al iniciar sesión en Ubuntu."
+    )
+    return False
+
+  print("[*] Servicio de Systemd configurado y reiniciado con éxito.")
+  return True
+
+
 def get_supported_js_runtime():
   for executable, minimum_major, minimum_minor in (("deno", 2, 3), ("node", 22, 0)):
     runtime_path = shutil.which(executable)
@@ -294,6 +416,7 @@ def main():
 
   # 4. Configurar inicio automático a nivel de usuario (Systemd / Windows / macOS)
   home_dir = os.path.expanduser("~")
+  service_active = True
 
   if system == "Linux":
     service_dir = os.path.join(home_dir, ".config", "systemd", "user")
@@ -317,34 +440,7 @@ WantedBy=default.target
     with open(service_path, "w", encoding="utf-8") as f:
       f.write(service_content)
 
-    # El gestor solo conoce el unit file después de recargar la configuración.
-    run_command(["systemctl", "--user", "daemon-reload"])
-    reset_result = subprocess.run(
-        ["systemctl", "--user", "reset-failed", "xdm-companion.service"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if reset_result.returncode != 0 and "not loaded" not in (
-        reset_result.stderr or ""
-    ).lower():
-      print("[!] No se pudo limpiar el estado anterior de systemd; continuaré con el reinicio.")
-    run_command(["systemctl", "--user", "enable", "xdm-companion.service"])
-    run_command(["systemctl", "--user", "restart", "xdm-companion.service"])
-
-    service_status = subprocess.run(
-        ["systemctl", "--user", "is-active", "--quiet", "xdm-companion.service"],
-        check=False,
-    )
-    if service_status.returncode != 0:
-      subprocess.run(
-          ["systemctl", "--user", "--no-pager", "--full", "status", "xdm-companion.service"],
-          check=False,
-      )
-      raise SystemExit(
-          "[!] El servicio XDM Companion no quedó activo. El estado de systemd anterior muestra el motivo."
-      )
-    print("[*] Servicio de Systemd configurado y reiniciado con éxito.")
+    service_active = configure_systemd_user_service(service_path)
 
   elif system == "Windows":
     import winreg
@@ -403,13 +499,23 @@ WantedBy=default.target
     install_windows_uninstaller()
   print("[*] ==================================================")
   if all_ready:
-    if system == "Windows":
+    if system == "Linux" and not service_active:
+      print(
+          "[*] Instalación completada. El servicio quedó habilitado y arrancará "
+          "cuando inicies sesión en Ubuntu."
+      )
+    elif system == "Windows":
       print("[*] ¡Instalación completada! El servicio se inicia al iniciar sesión en Windows.")
       print("[*] Instala XDM Companion Bridge desde la tienda del navegador para habilitar la detección.")
     else:
       print("[*] ¡Instalación completada! El puente se activa al reiniciar Chrome y Firefox.")
   else:
-    print("[!] Instalación parcial; el servicio quedó activo.")
+    print("[!] Instalación parcial.")
+    if system == "Linux":
+      if service_active:
+        print("[*] El servicio de XDM Companion está activo.")
+      else:
+        print("[*] El servicio arrancará cuando inicies sesión en Ubuntu.")
     if not browser_ready:
       print("[!] Estado de la detección automática por navegador:")
       for browser, ready, detail in browser_integration_report(browser_statuses):
