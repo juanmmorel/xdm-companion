@@ -9,14 +9,7 @@ OUTPUT_DIR="${2:-$PROJECT_DIR/dist/release}"
   exit 2
 }
 
-CHROME_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$PROJECT_DIR/browser-bridge/manifest.chrome.json")"
-FIREFOX_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$PROJECT_DIR/browser-bridge/manifest.firefox.json")"
-NORMALIZED_TAG="${TAG#v}"
-[[ "$CHROME_VERSION" == "$FIREFOX_VERSION" ]] || { echo "Las versiones de Chrome y Firefox no coinciden." >&2; exit 1; }
-[[ "$CHROME_VERSION" == "$NORMALIZED_TAG" ]] || {
-  echo "El tag $TAG debe coincidir con la versión $CHROME_VERSION de los manifiestos." >&2
-  exit 1
-}
+python3 "$PROJECT_DIR/scripts/release.py" check "$TAG"
 
 mkdir -p "$OUTPUT_DIR"
 STAGE="$(mktemp -d "${TMPDIR:-/tmp}/xdm-companion-release.XXXXXXXX")"
