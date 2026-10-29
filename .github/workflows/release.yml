@@ -131,6 +131,9 @@ jobs:
           print(f"Paquetes verificados; puente local de Chrome {linux_manifest['version']} incluido.")
           PY
 
+      - name: Crear y validar los paquetes para las tiendas
+        run: python3 installer/build_store_packages.py
+
       - name: Publicar la release y sus checksums
         env:
           GH_TOKEN: ${{ github.token }}
@@ -140,5 +143,8 @@ jobs:
             "dist/release/$GITHUB_REF_NAME/xdm-companion-linux.tar.gz.sha256" \
             "dist/release/$GITHUB_REF_NAME/xdm-companion-windows.zip" \
             "dist/release/$GITHUB_REF_NAME/xdm-companion-windows.zip.sha256" \
+            "dist/store/xdm-companion-chrome-store.zip" \
+            "dist/store/xdm-companion-firefox-amo.xpi" \
+            "dist/store/xdm-companion-firefox-source.zip" \
             --title "XDM Companion $GITHUB_REF_NAME" \
             --generate-notes

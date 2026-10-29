@@ -16,6 +16,7 @@ sys.path.insert(
 
 import browser_bridge
 import install
+import build_store_packages
 
 
 def test_browser_report_identifies_chrome_as_ready_and_firefox_signature_blocker():
@@ -230,6 +231,29 @@ def test_chrome_store_archive_contains_manifest_at_zip_root(tmp_path):
     assert "providers/youtube.js" in names
     assert "icons/xdm-download-button.png" in names
     assert "manifest/manifest.json" not in names
+
+
+def test_store_package_builder_creates_version_matched_firefox_sources(tmp_path):
+  chrome_zip, firefox_xpi, firefox_sources = build_store_packages.build_packages(tmp_path)
+
+  with zipfile.ZipFile(chrome_zip) as archive:
+    chrome_version = json.loads(archive.read("manifest.json"))["version"]
+  with zipfile.ZipFile(firefox_xpi) as archive:
+    firefox_version = json.loads(archive.read("manifest.json"))["version"]
+  with zipfile.ZipFile(firefox_sources) as archive:
+    source_versions = {
+        json.loads(archive.read(name))["version"]
+        for name in (
+            "browser-bridge/manifest.chrome.json",
+            "browser-bridge/manifest.firefox.json",
+        )
+    }
+    names = set(archive.namelist())
+
+  assert chrome_version == firefox_version
+  assert source_versions == {firefox_version}
+  assert "browser-bridge/providers/youtube.js" in names
+  assert "installer/build_store_packages.py" in names
 
 
 def test_firefox_install_payload_path_is_visible_to_snap_home_interface(tmp_path):

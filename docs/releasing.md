@@ -37,4 +37,6 @@ python3 scripts/release.py publish
 
 El script comprueba que el checkout corresponda a `origin/main`, ejecuta las pruebas, crea y verifica los paquetes de Linux y Windows, y deriva el tag de las versiones sincronizadas. Solo entonces publica el tag. GitHub Actions vuelve a comprobar el tag antes de ejecutar la validación de Windows y crear la release con los dos paquetes y sus checksums.
 
+El mismo flujo preconstruye y valida los paquetes de Chrome Web Store, Firefox Add-ons y las fuentes de Firefox. GitHub Actions los reconstruye desde el tag y los adjunta a la misma Release. Para generar esos tres archivos localmente antes de enviarlos a las tiendas, ejecuta `python3 installer/build_store_packages.py`; quedan en `dist/store/`.
+
 Si un tag ya existe, el script no lo mueve ni lo reutiliza; el incremento selecciona una versión posterior disponible.

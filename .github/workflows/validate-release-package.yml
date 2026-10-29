@@ -37,6 +37,9 @@ jobs:
           python -m pytest -q -p no:cacheprovider
           node integration_tests/browser_bridge.test.js
 
+      - name: Construir y validar los paquetes de Chrome y Firefox
+        run: python3 installer/build_store_packages.py --output-dir "${RUNNER_TEMP}/xdm-companion-store-check"
+
       - name: Construir y verificar los paquetes de la próxima release
         run: |
           VERSION="$(python -c 'import json; print(json.load(open("browser-bridge/manifest.chrome.json"))["version"])')"

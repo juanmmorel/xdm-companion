@@ -220,6 +220,16 @@ def publish():
         cwd=release_dir,
         check=True,
     )
+    subprocess.run(
+        [
+            sys.executable,
+            "installer/build_store_packages.py",
+            "--output-dir",
+            str(Path(temporary) / "store"),
+        ],
+        cwd=ROOT,
+        check=True,
+    )
 
   run_git("tag", "-a", tag, "-m", f"Release {tag}")
   run_git("push", "origin", tag)
