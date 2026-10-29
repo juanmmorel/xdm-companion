@@ -90,8 +90,18 @@ def test_build_extension_scopes_permissions_to_configured_sites(tmp_path):
   ]
   assert chrome["icons"]["128"] == "icons/companion-128.png"
   assert (chrome_dir / "icons" / "companion-128.png").is_file()
+  assert chrome["web_accessible_resources"] == [{
+      "resources": ["icons/xdm-download-button.png"],
+      "matches": chrome["content_scripts"][0]["matches"],
+  }]
+  assert (chrome_dir / "icons" / "xdm-download-button.png").is_file()
   assert firefox["icons"]["128"] == "icons/companion-128.png"
   assert (firefox_dir / "icons" / "companion-128.png").is_file()
+  assert firefox["web_accessible_resources"] == [{
+      "resources": ["icons/xdm-download-button.png"],
+      "matches": firefox["content_scripts"][0]["matches"],
+  }]
+  assert (firefox_dir / "icons" / "xdm-download-button.png").is_file()
   assert "*://*.youtube.com/*" in chrome["host_permissions"]
   assert "http://127.0.0.1:21121/*" in firefox["host_permissions"]
   assert "*://*.tiktok.com/*" in firefox["content_scripts"][0]["matches"]
@@ -115,6 +125,7 @@ def test_firefox_xpi_packages_the_generated_manifest(tmp_path):
     assert "providers/youtube.js" in manifest["background"]["scripts"]
     assert "site-config.js" in archive.namelist()
     assert "icons/companion-128.png" in archive.namelist()
+    assert "icons/xdm-download-button.png" in archive.namelist()
   assert not browser_bridge.contains_firefox_signature_metadata(xpi)
 
 
@@ -217,6 +228,7 @@ def test_chrome_store_archive_contains_manifest_at_zip_root(tmp_path):
     assert "background.js" in names
     assert "site-config.js" in names
     assert "providers/youtube.js" in names
+    assert "icons/xdm-download-button.png" in names
     assert "manifest/manifest.json" not in names
 
 
