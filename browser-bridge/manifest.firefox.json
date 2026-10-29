@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "XDM Companion Bridge",
-  "version": "1.1.30",
+  "version": "1.1.32",
   "description": "Detecta videos en sitios configurados y permite enviar a XDM Companion una calidad que pueda descargar XDM.",
   "icons": {
     "16": "icons/companion-16.png",
@@ -14,22 +14,35 @@
       "id": "xdm-companion-bridge@xdm.local",
       "strict_min_version": "140.0",
       "data_collection_permissions": {
-        "required": ["browsingActivity", "websiteActivity", "websiteContent"]
+        "required": [
+          "browsingActivity",
+          "websiteActivity",
+          "websiteContent"
+        ]
       }
     },
     "gecko_android": {
       "strict_min_version": "142.0"
     }
   },
-  "permissions": ["cookies", "scripting"],
-  "host_permissions": ["http://127.0.0.1:21121/*"],
+  "permissions": [
+    "cookies",
+    "scripting"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:21121/*"
+  ],
   "background": {
-    "scripts": ["background.js"]
+    "scripts": [
+      "background.js"
+    ]
   },
   "content_scripts": [
     {
       "matches": [],
-      "js": ["content.js"],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_start",
       "all_frames": true,
       "match_about_blank": true
