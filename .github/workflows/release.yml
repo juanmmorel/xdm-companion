@@ -9,7 +9,17 @@ permissions:
   contents: write
 
 jobs:
+  validate-release-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Obtener el código
+        uses: actions/checkout@v4
+
+      - name: Validar la versión del tag antes de iniciar la compilación
+        run: python3 scripts/release.py check "$GITHUB_REF_NAME"
+
   check-windows-installer:
+    needs: validate-release-tag
     runs-on: windows-latest
     steps:
       - name: Obtener el código
@@ -32,7 +42,7 @@ jobs:
           }
 
   release:
-    needs: check-windows-installer
+    needs: [validate-release-tag, check-windows-installer]
     runs-on: ubuntu-latest
     steps:
       - name: Obtener el código
