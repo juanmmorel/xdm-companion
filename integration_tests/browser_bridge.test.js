@@ -57,6 +57,9 @@ class FakeElement {
   }
   setAttribute(name, value) { this.attributes.set(name, String(value)); }
   removeAttribute(name) { this.attributes.delete(name); }
+  getBoundingClientRect() {
+    return { left: 0, right: 252, top: 0, bottom: 60, width: 252, height: 60 };
+  }
   addEventListener(name, callback, options = false) {
     if (!this.listeners.has(name)) this.listeners.set(name, []);
     const capture = typeof options === "boolean" ? options : Boolean(options && options.capture);
@@ -207,7 +210,12 @@ function loadContentScript({ onMessage = async () => ({ ok: true }), videos = []
     },
     clearTimeout: timerId => timers.delete(timerId),
     window: browserWindow,
-    chrome: { runtime: { sendMessage: onMessage } },
+    chrome: {
+      runtime: {
+        sendMessage: onMessage,
+        getURL: resource => `chrome-extension://test-extension/${resource}`,
+      },
+    },
     XDM_SITE_CATALOG: siteCatalog,
   };
   vm.runInNewContext(fs.readFileSync(path.join(bridgeDir, "content.js"), "utf8"), context);
@@ -265,6 +273,10 @@ test("the floating XDM button loads choices and sends the selected resolution", 
   const shadow = host.shadowRoot;
   const trigger = shadow.getElementById("trigger");
   assert.ok(trigger);
+  assert.equal(
+    trigger.children[0].src,
+    "chrome-extension://test-extension/icons/xdm-download-button.png",
+  );
   assert.equal(messages.length, 1, "prefetching formats does not start a download");
 
   trigger.dispatch("click");

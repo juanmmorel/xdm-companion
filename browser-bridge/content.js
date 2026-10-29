@@ -172,15 +172,15 @@
         color: #f8fbff;
       }
       #trigger {
-        display: none; align-items: center; gap: 7px; min-height: 34px;
-        padding: 0 12px; border: 1px solid rgba(255,255,255,.28);
-        border-radius: 18px; background: #102b50; color: #fff;
-        box-shadow: 0 2px 12px rgba(0,0,0,.38); font: 600 13px system-ui,sans-serif;
-        cursor: pointer; pointer-events: auto;
+        display: none; align-items: center; justify-content: center;
+        width: 252px; max-width: calc(100vw - 16px); min-height: 0;
+        padding: 0; border: 0; border-radius: 999px; background: transparent;
+        box-shadow: 0 2px 12px rgba(0,0,0,.28); cursor: pointer; pointer-events: auto;
       }
-      #trigger:hover, #trigger:focus-visible { background: #17477b; outline: 2px solid #76d7ff; }
+      #trigger .button-art { display: block; width: 100%; height: auto; border-radius: 999px; }
+      #trigger:hover { filter: brightness(1.04); }
+      #trigger:focus-visible { outline: 2px solid #76d7ff; outline-offset: 2px; }
       #trigger:disabled { opacity: .65; cursor: wait; }
-      #trigger .arrow { color: #68e3d3; font-size: 16px; line-height: 1; }
       #menu {
         display: none; width: 252px; max-height: min(360px, calc(100vh - 64px));
         box-sizing: border-box; overflow: hidden; border: 1px solid rgba(255,255,255,.18);
@@ -213,12 +213,15 @@
     trigger.id = "trigger";
     trigger.type = "button";
     trigger.title = "Elegir resolución y descargar con XDM";
+    trigger.setAttribute("aria-label", "XDM Download: elegir resolución y descargar");
     trigger.setAttribute("aria-haspopup", "dialog");
     trigger.setAttribute("aria-expanded", "false");
-    const arrow = document.createElement("span");
-    arrow.className = "arrow";
-    arrow.textContent = "↓";
-    trigger.append(arrow, document.createTextNode("XDM"));
+    const buttonArt = document.createElement("img");
+    buttonArt.className = "button-art";
+    buttonArt.src = chrome.runtime.getURL("icons/xdm-download-button.png");
+    buttonArt.alt = "";
+    buttonArt.setAttribute("aria-hidden", "true");
+    trigger.append(buttonArt);
 
     const menu = document.createElement("div");
     menu.id = "menu";
@@ -311,10 +314,15 @@
     if (rect.width < 40 || rect.height < 30) return;
     const width = 252;
     const left = Math.min(Math.max(8, rect.right - width - 10), Math.max(8, innerWidth - width - 8));
-    const top = Math.min(Math.max(8, rect.top + 10), Math.max(8, innerHeight - 46));
+    const triggerHeight = ui.trigger.getBoundingClientRect().height || 60;
+    const top = Math.min(
+      Math.max(8, rect.top + 10),
+      Math.max(8, innerHeight - triggerHeight - 8),
+    );
     ui.widget.style.left = `${left}px`;
     ui.widget.style.top = `${top}px`;
-    ui.widget.classList.toggle("open-up", top + 390 > innerHeight);
+    const widgetHeight = ui.widget.getBoundingClientRect().height || triggerHeight;
+    ui.widget.classList.toggle("open-up", top + widgetHeight > innerHeight - 8);
   }
 
   function openMenu() {

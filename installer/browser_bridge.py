@@ -76,6 +76,10 @@ def build_extension(source_dir, domains_file, output_dir, browser):
   manifest.setdefault("host_permissions", []).extend(patterns)
   manifest["content_scripts"][0]["matches"] = patterns
   manifest["content_scripts"][0]["js"] = ["site-config.js", "content.js"]
+  manifest["web_accessible_resources"] = [{
+      "resources": ["icons/xdm-download-button.png"],
+      "matches": patterns,
+  }]
   if browser == "firefox":
     manifest["background"]["scripts"] = [
         "site-config.js",
