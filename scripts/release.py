@@ -31,7 +31,9 @@ def parse_version(value):
   return tuple(int(part) for part in match.groups())
 
 
-def read_manifest_versions(paths=MANIFESTS):
+def read_manifest_versions(paths=None):
+  if paths is None:
+    paths = MANIFESTS
   versions = []
   for path in paths:
     try:
