@@ -173,11 +173,11 @@
       }
       #trigger {
         display: none; align-items: center; justify-content: center;
-        width: 252px; max-width: calc(100vw - 16px); min-height: 0;
-        padding: 0; border: 0; border-radius: 999px; background: transparent;
-        box-shadow: 0 2px 12px rgba(0,0,0,.28); cursor: pointer; pointer-events: auto;
+        width: 120px; max-width: calc(100vw - 16px); min-height: 0;
+        padding: 0; border: 0; border-radius: 0; background: transparent;
+        box-shadow: none; cursor: pointer; pointer-events: auto;
       }
-      #trigger .button-art { display: block; width: 100%; height: auto; border-radius: 999px; }
+      #trigger .button-art { display: block; width: 100%; height: auto; }
       #trigger:hover { filter: brightness(1.04); }
       #trigger:focus-visible { outline: 2px solid #76d7ff; outline-offset: 2px; }
       #trigger:disabled { opacity: .65; cursor: wait; }

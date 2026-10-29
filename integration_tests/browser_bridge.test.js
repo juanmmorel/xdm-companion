@@ -58,7 +58,7 @@ class FakeElement {
   setAttribute(name, value) { this.attributes.set(name, String(value)); }
   removeAttribute(name) { this.attributes.delete(name); }
   getBoundingClientRect() {
-    return { left: 0, right: 252, top: 0, bottom: 60, width: 252, height: 60 };
+    return { left: 0, right: 252, top: 0, bottom: 38, width: 252, height: 38 };
   }
   addEventListener(name, callback, options = false) {
     if (!this.listeners.has(name)) this.listeners.set(name, []);
