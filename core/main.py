@@ -10,7 +10,7 @@ import time
 import uuid
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from urllib.parse import parse_qs, urljoin, urlparse
+from urllib.parse import parse_qs, quote, urljoin, urlparse
 
 import requests
 import yt_dlp
@@ -40,7 +40,9 @@ MAX_COOKIE_LENGTH = 64_000
 MAX_URL_LENGTH = 8_192
 MAX_COOKIE_COUNT = 2_000
 app.config["MAX_CONTENT_LENGTH"] = 512 * 1024
-_BROWSER_HANDOFF_PATHS = {"/intercept", "/formats", "/select"}
+_BROWSER_HANDOFF_PATHS = {
+    "/intercept", "/formats", "/select", "/playlist/start", "/playlist/queue", "/playlist/status",
+}
 
 
 def _is_extension_origin(origin):
@@ -100,6 +102,12 @@ _format_sessions = {}
 _format_sessions_lock = threading.Lock()
 FORMAT_SESSION_TTL_SECONDS = 5 * 60
 MAX_FORMAT_SESSIONS = 64
+MAX_PLAYLIST_JOBS = 32
+PLAYLIST_JOB_TTL_SECONDS = 6 * 60 * 60
+PLAYLIST_PREVIEW_TTL_SECONDS = 15 * 60
+_playlist_jobs = {}
+_playlist_jobs_lock = threading.Lock()
+_active_playlist_urls = {}
 
 
 
@@ -371,6 +379,165 @@ def _extract_video_info(page_url, cookies, user_agent, audio_track=None, accept_
         yt_dlp_authenticated, log_collector.flags,
     )
   return info
+
+
+def _playlist_config(page_url):
+  provider = provider_config_for_url(page_url, SITE_CATALOG)
+  config = (provider or {}).get("backend", {}).get("playlist", {})
+  if not isinstance(config, dict) or config.get("enabled") is not True:
+    return provider, None
+  try:
+    max_items = int(config.get("max_items", 0))
+  except (TypeError, ValueError):
+    max_items = 0
+  if max_items < 1:
+    return provider, None
+  return provider, {**config, "max_items": max_items}
+
+
+def _canonical_playlist_url(page_url):
+  provider = provider_config_for_url(page_url, SITE_CATALOG)
+  config = (provider or {}).get("browser", {}).get("playlist", {})
+  if not isinstance(config, dict):
+    return page_url
+  try:
+    parsed = urlparse(page_url)
+    query = parse_qs(parsed.query)
+  except (TypeError, ValueError):
+    return page_url
+  template = str(config.get("url_template") or "")
+  if not template or "{playlist_id}" not in template:
+    return page_url
+  for parameter in config.get("query_parameters", []):
+    values = query.get(str(parameter))
+    if not values or not values[0]:
+      continue
+    candidate = template.replace("{playlist_id}", quote(values[0], safe=""))
+    item_provider = provider_config_for_url(candidate, SITE_CATALOG)
+    if item_provider and provider and item_provider.get("id") == provider.get("id"):
+      return candidate
+  return page_url
+
+
+def _playlist_entry_url(entry, page_url, provider):
+  if not isinstance(entry, dict):
+    return ""
+  for key in ("webpage_url", "original_url", "url"):
+    candidate = str(entry.get(key) or "").strip()
+    try:
+      parsed = urlparse(candidate)
+    except ValueError:
+      continue
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+      if parsed.username or parsed.password:
+        continue
+      item_provider = provider_config_for_url(candidate, SITE_CATALOG)
+      if item_provider and item_provider.get("id") == provider.get("id"):
+        return candidate
+
+  video_id = str(entry.get("id") or "").strip()
+  template = str(
+      ((provider or {}).get("browser", {}).get("preview") or {}).get("video_url_template")
+      or "",
+  )
+  if video_id and template and "{video_id}" in template:
+    candidate = template.replace("{video_id}", quote(video_id, safe=""))
+    candidate = urljoin(page_url, candidate)
+    item_provider = provider_config_for_url(candidate, SITE_CATALOG)
+    if item_provider and item_provider.get("id") == provider.get("id"):
+      return candidate
+  return ""
+
+
+def _extract_playlist_entries(page_url, cookies, user_agent, accept_language=""):
+  provider, playlist_config = _playlist_config(page_url)
+  if not playlist_config:
+    raise CompanionError("Este sitio no tiene habilitada la descarga de listas.")
+
+  max_items = playlist_config["max_items"]
+  adapter = adapter_for_url(page_url, SITE_CATALOG)
+  headers = {"Referer": page_url}
+  if user_agent:
+    headers["User-Agent"] = user_agent
+  if accept_language:
+    headers["Accept-Language"] = accept_language
+
+  options = {
+      "noplaylist": False,
+      "extract_flat": "in_playlist",
+      "playlistend": max_items + 1,
+      "ignoreerrors": True,
+      "quiet": True,
+      "no_warnings": False,
+      "verbose": adapter.verbose_diagnostics() if adapter else False,
+      "skip_download": True,
+      "http_headers": headers,
+      "js_runtimes": _js_runtimes(),
+  }
+  log_collector = _YtDlpLogCollector(adapter)
+  options["logger"] = log_collector
+  extractor_key = adapter.extractor_key() if adapter else ""
+  extractor_args = adapter.extractor_args() if adapter else {}
+  if extractor_args:
+    options["extractor_args"] = extractor_args
+  cookie_file = _write_cookie_file(page_url, cookies)
+  if cookie_file:
+    options["cookiefile"] = cookie_file
+
+  try:
+    with yt_dlp.YoutubeDL(options) as downloader:
+      info = downloader.extract_info(page_url, download=False)
+      if not isinstance(info, dict) or info.get("_type") not in {"playlist", "multi_video"}:
+        raise CompanionError("El enlace no corresponde a una lista compatible.")
+      declared_count = info.get("playlist_count")
+      try:
+        if declared_count is not None and int(declared_count) > max_items:
+          raise CompanionError(
+              f"La lista supera el límite configurado de {max_items} videos; no se inició ninguna descarga."
+          )
+      except (TypeError, ValueError):
+        pass
+
+      raw_entries = info.get("entries")
+      if raw_entries is None:
+        raise CompanionError("El sitio no devolvió los videos de la lista.")
+      entries = []
+      for position, entry in enumerate(raw_entries, start=1):
+        if position > max_items:
+          raise CompanionError(
+              f"La lista supera el límite configurado de {max_items} videos; no se inició ninguna descarga."
+          )
+        item_url = _playlist_entry_url(entry, page_url, provider)
+        entries.append({
+            "position": position,
+            "url": item_url,
+            "title": str((entry or {}).get("title") or "").strip()[:500],
+        })
+      if not entries:
+        raise CompanionError("La lista no contiene videos disponibles para procesar.")
+      return {
+          "title": str(info.get("title") or "Lista de reproducción").strip()[:500],
+          "entries": entries,
+      }
+  except CompanionError:
+    raise
+  except Exception as error:
+    error_message = str(error).lower()
+    if "javascript runtime" in error_message or "yt-dlp-ejs" in error_message:
+      if adapter:
+        raise CompanionError(adapter.runtime_requirement_message()) from error
+      raise CompanionError("Instala un runtime de JavaScript compatible y vuelve a intentarlo.") from error
+    if adapter:
+      friendly_error = adapter.extraction_error(error, cookies, None, log_collector.flags)
+      if friendly_error:
+        raise CompanionError(friendly_error) from error
+    raise CompanionError("No se pudo leer la lista. Comprueba el enlace y el acceso desde el navegador.") from error
+  finally:
+    if cookie_file:
+      try:
+        os.unlink(cookie_file)
+      except OSError:
+        pass
 
 
 def _media_from_format(
@@ -818,6 +985,263 @@ def _ensure_xdm_ready():
     raise CompanionError("La integración del navegador de XDM no está habilitada.")
 
 
+def _resolve_format_options(
+    payload, page_url, cookies, user_agent, audio_track, accept_language,
+):
+  adapter = adapter_for_url(page_url, SITE_CATALOG)
+  resolver = getattr(adapter, "resolve_format_options", None) if adapter else None
+  if resolver:
+    return resolver(
+        payload,
+        page_url,
+        cookies,
+        user_agent,
+        audio_track,
+        accept_language,
+        extract_info=_extract_video_info,
+        available_formats=_available_formats,
+        format_inventory=_format_inventory,
+        store_session=_store_format_session,
+        logger=app.logger,
+    )
+
+  info = _extract_video_info(page_url, cookies, user_agent, audio_track, accept_language)
+  available = _available_formats(
+      info, page_url, cookies, user_agent, audio_track, accept_language,
+  )
+  inventory = _format_inventory(info, available)
+  if not available:
+    raise CompanionError("No se encontraron resoluciones compatibles con XDM para este video.")
+  token = _store_format_session(available)
+  return info, available, inventory, token, None
+
+
+def _playlist_snapshot(job):
+  return {
+      "id": job["id"],
+      "title": job.get("title") or "Lista de reproducción",
+      "status": job["status"],
+      "total": job.get("total"),
+      "downloadable_count": job.get("downloadable_count", 0),
+      "selection_limit": job.get("selection_limit"),
+      "processed": job.get("processed", 0),
+      "queued": job.get("queued", 0),
+      "skipped": job.get("skipped", 0),
+      "failed": job.get("failed", 0),
+      "current_position": job.get("current_position"),
+      "current_title": job.get("current_title", ""),
+      "message": job.get("message", ""),
+      "issues": list(job.get("issues", [])),
+  }
+
+
+def _prune_playlist_jobs_locked(now=None):
+  now = time.time() if now is None else now
+  for job_id, job in list(_playlist_jobs.items()):
+    finished_expired = (
+        job.get("finished_at")
+        and now - job["finished_at"] > PLAYLIST_JOB_TTL_SECONDS
+    )
+    preview_expired = (
+        job.get("status") == "awaiting_selection"
+        and now - job.get("created_at", now) > PLAYLIST_PREVIEW_TTL_SECONDS
+    )
+    if finished_expired or preview_expired:
+      _playlist_jobs.pop(job_id, None)
+      if _active_playlist_urls.get(job.get("page_url")) == job_id:
+        _active_playlist_urls.pop(job.get("page_url"), None)
+  if len(_playlist_jobs) >= MAX_PLAYLIST_JOBS:
+    finished = sorted(
+        (job for job in _playlist_jobs.values() if job.get("finished_at")),
+        key=lambda job: job["finished_at"],
+    )
+    while len(_playlist_jobs) >= MAX_PLAYLIST_JOBS and finished:
+      _playlist_jobs.pop(finished.pop(0)["id"], None)
+
+
+def _add_playlist_issue(job, position, title, outcome, reason):
+  issue = {
+      "position": position,
+      "title": str(title or "Video")[:160],
+      "outcome": outcome,
+      "reason": re.sub(r"https?://\S+", "[enlace]", str(reason or ""))[:240],
+  }
+  with _playlist_jobs_lock:
+    job["issues"].append(issue)
+    if len(job["issues"]) > 30:
+      del job["issues"][:-30]
+
+
+def _preview_playlist_job(job_id, page_url, cookies, user_agent, accept_language):
+  with _playlist_jobs_lock:
+    job = _playlist_jobs.get(job_id)
+  if not job:
+    return
+  try:
+    playlist = _extract_playlist_entries(page_url, cookies, user_agent, accept_language)
+    entries = playlist["entries"]
+    with _playlist_jobs_lock:
+      if job.get("status") != "enumerating":
+        return
+      job["title"] = playlist["title"]
+      job["total"] = len(entries)
+      job["downloadable_count"] = sum(bool(entry.get("url")) for entry in entries)
+      job["_entries"] = entries
+      job["status"] = "awaiting_selection"
+      job["message"] = "Elige cuántos videos de la lista quieres enviar a XDM."
+  except CompanionError as error:
+    with _playlist_jobs_lock:
+      job["status"] = "failed"
+      job["message"] = str(error)[:300]
+      job["finished_at"] = time.time()
+      _active_playlist_urls.pop(page_url, None)
+    return
+  except Exception:
+    app.logger.exception("No se pudo enumerar una lista de reproducción.")
+    with _playlist_jobs_lock:
+      job["status"] = "failed"
+      job["message"] = "No se pudo leer la lista de reproducción."
+      job["finished_at"] = time.time()
+      _active_playlist_urls.pop(page_url, None)
+    return
+
+def _process_playlist_entries(job_id, page_url, entries, cookies, user_agent, accept_language):
+  with _playlist_jobs_lock:
+    job = _playlist_jobs.get(job_id)
+  if not job:
+    return
+  with _playlist_jobs_lock:
+    job["status"] = "processing"
+    job["total"] = len(entries)
+    job["processed"] = 0
+    job["queued"] = 0
+    job["skipped"] = 0
+    job["failed"] = 0
+    job["current_position"] = None
+    job["current_title"] = ""
+    job["message"] = "Resolviendo y enviando cada video a XDM en orden."
+
+  width = max(3, len(str(len(entries))))
+  for entry in entries:
+    position = entry["position"]
+    title = entry.get("title") or f"Video {position}"
+    with _playlist_jobs_lock:
+      job["current_position"] = position
+      job["current_title"] = title[:160]
+      job["message"] = f"Procesando video {position} de {len(entries)}."
+    if not entry.get("url"):
+      _add_playlist_issue(
+          job, position, title, "skipped", "El sitio no entregó un enlace individual válido.",
+      )
+      with _playlist_jobs_lock:
+        job["skipped"] += 1
+        job["processed"] += 1
+      continue
+
+    item_url = entry["url"]
+    item_payload = {
+        "url": item_url,
+        "cookies": cookies,
+        "user_agent": user_agent,
+        "accept_language": accept_language,
+        "title": title,
+    }
+    try:
+      _info, available, _inventory, session, _notice = _resolve_format_options(
+          item_payload,
+          item_url,
+          cookies,
+          user_agent,
+          None,
+          accept_language,
+      )
+      if not available:
+        raise CompanionError("No se encontró una calidad compatible con XDM.")
+      option, _unused_media = available[0]
+      selection = _consume_format_selection(session, option["format_id"])
+      if not selection:
+        raise CompanionError("La sesión de formato venció antes de procesar el video.")
+      _selected_option, media = selection
+    except CompanionError as error:
+      _add_playlist_issue(job, position, title, "skipped", str(error))
+      with _playlist_jobs_lock:
+        job["skipped"] += 1
+        job["processed"] += 1
+      continue
+    except Exception:
+      app.logger.exception("No se pudo resolver un elemento de una lista de reproducción.")
+      _add_playlist_issue(
+          job, position, title, "skipped", "No se pudo resolver una calidad compatible.",
+      )
+      with _playlist_jobs_lock:
+        job["skipped"] += 1
+        job["processed"] += 1
+      continue
+
+    numbered_title = f"{position:0{width}d} - {media.get('title') or title}"[:500]
+    media["title"] = numbered_title
+    extension = str(media.get("ext") or "").strip()
+    media["filename"] = f"{numbered_title}.{extension}" if extension else numbered_title
+    try:
+      _send_to_xdm(media, preferred_height=option["height"])
+    except CompanionError as error:
+      _add_playlist_issue(job, position, title, "failed", str(error))
+      with _playlist_jobs_lock:
+        job["failed"] += 1
+        job["processed"] += 1
+      continue
+    except Exception:
+      app.logger.exception("XDM rechazó un elemento de una lista de reproducción.")
+      _add_playlist_issue(
+          job, position, title, "failed", "No se pudo entregar el video a XDM.",
+      )
+      with _playlist_jobs_lock:
+        job["failed"] += 1
+        job["processed"] += 1
+      continue
+
+    with _playlist_jobs_lock:
+      job["queued"] += 1
+      job["processed"] += 1
+
+  with _playlist_jobs_lock:
+    job["status"] = "completed_with_issues" if job["skipped"] or job["failed"] else "completed"
+    job["current_position"] = None
+    job["current_title"] = ""
+    job["message"] = "Lista enviada a XDM." if job["status"] == "completed" else "Lista procesada con videos omitidos o fallidos."
+    job["finished_at"] = time.time()
+    _active_playlist_urls.pop(page_url, None)
+
+
+def _process_playlist_job(job_id, page_url, cookies, user_agent, accept_language):
+  """Compatibility worker used by tests and older in-process callers."""
+  with _playlist_jobs_lock:
+    job = _playlist_jobs.get(job_id)
+  if not job:
+    return
+  try:
+    playlist = _extract_playlist_entries(page_url, cookies, user_agent, accept_language)
+    entries = playlist["entries"]
+    with _playlist_jobs_lock:
+      job["title"] = playlist["title"]
+      job["downloadable_count"] = sum(bool(entry.get("url")) for entry in entries)
+      job["_entries"] = entries
+    _process_playlist_entries(job_id, page_url, entries, cookies, user_agent, accept_language)
+  except CompanionError as error:
+    with _playlist_jobs_lock:
+      job["status"] = "failed"
+      job["message"] = str(error)[:300]
+      job["finished_at"] = time.time()
+      _active_playlist_urls.pop(page_url, None)
+  except Exception:
+    app.logger.exception("No se pudo procesar una lista de reproducción.")
+    with _playlist_jobs_lock:
+      job["status"] = "failed"
+      job["message"] = "No se pudo procesar la lista de reproducción."
+      job["finished_at"] = time.time()
+      _active_playlist_urls.pop(page_url, None)
+
+
 
 
 
@@ -1027,33 +1451,15 @@ def formats():
   except CompanionError as error:
     return jsonify({"status": "error", "message": str(error)}), 502
 
-  adapter = adapter_for_url(page_url, SITE_CATALOG)
-  resolver = getattr(adapter, "resolve_format_options", None) if adapter else None
   try:
-    if resolver:
-      info, available, inventory, token, notice = resolver(
-          payload,
-          page_url,
-          cookies,
-          user_agent,
-          audio_track,
-          accept_language,
-          extract_info=_extract_video_info,
-          available_formats=_available_formats,
-          format_inventory=_format_inventory,
-          store_session=_store_format_session,
-          logger=app.logger,
-      )
-    else:
-      info = _extract_video_info(page_url, cookies, user_agent, audio_track, accept_language)
-      available = _available_formats(
-          info, page_url, cookies, user_agent, audio_track, accept_language,
-      )
-      inventory = _format_inventory(info, available)
-      if not available:
-        raise CompanionError("No se encontraron resoluciones compatibles con XDM para este video.")
-      token = _store_format_session(available)
-      notice = None
+    _info, available, inventory, token, notice = _resolve_format_options(
+        payload,
+        page_url,
+        cookies,
+        user_agent,
+        audio_track,
+        accept_language,
+    )
   except CompanionError as error:
     return jsonify({"status": "error", "message": str(error)}), 422
 
@@ -1064,6 +1470,184 @@ def formats():
       "audio_track": audio_track,
       "notice": notice,
   })
+
+
+@app.post("/playlist/start")
+def start_playlist():
+  payload = request.get_json(silent=True)
+  if not isinstance(payload, dict):
+    return jsonify({"status": "error", "message": "Solicitud de lista no válida."}), 400
+  try:
+    page_url, cookies, user_agent, _title, _audio_track, accept_language = _safe_browser_data(payload)
+  except CompanionError as error:
+    return jsonify({"status": "error", "message": str(error)}), 400
+  page_url = _canonical_playlist_url(page_url)
+  _provider, playlist_config = _playlist_config(page_url)
+  if not playlist_config:
+    return jsonify({"status": "error", "message": "Este sitio no tiene habilitada la descarga de listas."}), 422
+  with _playlist_jobs_lock:
+    _prune_playlist_jobs_locked()
+    existing_job_id = _active_playlist_urls.get(page_url)
+    if existing_job_id and existing_job_id in _playlist_jobs:
+      return jsonify({
+          "status": "accepted",
+          "job": _playlist_snapshot(_playlist_jobs[existing_job_id]),
+      })
+    active_jobs = [
+        job for job in _playlist_jobs.values()
+        if job.get("status") in {"enumerating", "processing"}
+    ]
+    if active_jobs:
+      return jsonify({
+          "status": "error",
+          "message": "XDM Companion ya está procesando otra lista. Espera a que termine.",
+      }), 409
+
+    job_id = uuid.uuid4().hex
+    job = {
+        "id": job_id,
+        "page_url": page_url,
+        "title": str(payload.get("title") or "Lista de reproducción").strip()[:500],
+        "status": "enumerating",
+        "total": None,
+        "downloadable_count": 0,
+        "selection_limit": None,
+        "processed": 0,
+        "queued": 0,
+        "skipped": 0,
+        "failed": 0,
+        "current_position": None,
+        "current_title": "",
+        "message": "Leyendo la lista de reproducción.",
+        "issues": [],
+        "created_at": time.time(),
+        "finished_at": None,
+    }
+    _playlist_jobs[job_id] = job
+    _active_playlist_urls[page_url] = job_id
+
+  worker = threading.Thread(
+      target=_preview_playlist_job,
+      args=(job_id, page_url, cookies, user_agent, accept_language),
+      daemon=True,
+      name="xdm-companion-playlist",
+  )
+  try:
+    worker.start()
+  except RuntimeError:
+    with _playlist_jobs_lock:
+      job["status"] = "failed"
+      job["message"] = "No se pudo iniciar el procesamiento de la lista."
+      job["finished_at"] = time.time()
+      _active_playlist_urls.pop(page_url, None)
+    return jsonify({"status": "error", "message": job["message"]}), 503
+  with _playlist_jobs_lock:
+    snapshot = _playlist_snapshot(job)
+  return jsonify({"status": "accepted", "job": snapshot})
+
+
+@app.post("/playlist/queue")
+def queue_playlist():
+  payload = request.get_json(silent=True)
+  if not isinstance(payload, dict):
+    return jsonify({"status": "error", "message": "Solicitud de lista no válida."}), 400
+  try:
+    page_url, cookies, user_agent, _title, _audio_track, accept_language = _safe_browser_data(payload)
+  except CompanionError as error:
+    return jsonify({"status": "error", "message": str(error)}), 400
+
+  page_url = _canonical_playlist_url(page_url)
+  job_id = str(payload.get("job_id") or "")
+  if not re.fullmatch(r"[0-9a-f]{32}", job_id):
+    return jsonify({"status": "error", "message": "La vista previa de la lista venció. Vuelve a abrirla."}), 400
+  requested_limit = payload.get("limit")
+  if requested_limit == "all":
+    requested_limit = 0
+  if type(requested_limit) is not int or requested_limit not in {0, 5, 10, 20, 30, 40}:
+    return jsonify({"status": "error", "message": "La cantidad seleccionada no es válida."}), 400
+
+  try:
+    _ensure_xdm_ready()
+  except CompanionError as error:
+    return jsonify({"status": "error", "message": str(error)}), 502
+
+  with _playlist_jobs_lock:
+    _prune_playlist_jobs_locked()
+    job = _playlist_jobs.get(job_id)
+    if not job or job.get("page_url") != page_url:
+      return jsonify({
+          "status": "error",
+          "message": "La vista previa de la lista venció. Vuelve a abrirla.",
+      }), 410
+    if job.get("status") == "processing":
+      return jsonify({"status": "accepted", "job": _playlist_snapshot(job)})
+    if job.get("status") != "awaiting_selection":
+      return jsonify({
+          "status": "error",
+          "message": job.get("message") or "La lista todavía no está lista para enviarse a XDM.",
+      }), 409
+
+    active_jobs = [
+        other for other_id, other in _playlist_jobs.items()
+        if other_id != job_id and other.get("status") == "processing"
+    ]
+    if active_jobs:
+      return jsonify({
+          "status": "error",
+          "message": "XDM Companion ya está procesando otra lista. Espera a que termine.",
+      }), 409
+
+    entries = list(job.get("_entries") or [])
+    candidates = [entry for entry in entries if entry.get("url")]
+    selected_entries = candidates if requested_limit == 0 else candidates[:requested_limit]
+    if not selected_entries:
+      return jsonify({"status": "error", "message": "La lista no contiene videos con enlaces disponibles."}), 422
+    job["status"] = "processing"
+    job["total"] = len(selected_entries)
+    job["selection_limit"] = "all" if requested_limit == 0 else requested_limit
+    job["processed"] = 0
+    job["queued"] = 0
+    job["skipped"] = 0
+    job["failed"] = 0
+    job["current_position"] = None
+    job["current_title"] = ""
+    job["message"] = "Resolviendo y enviando los videos seleccionados a XDM en orden."
+    snapshot = _playlist_snapshot(job)
+
+  worker = threading.Thread(
+      target=_process_playlist_entries,
+      args=(job_id, page_url, selected_entries, cookies, user_agent, accept_language),
+      daemon=True,
+      name="xdm-companion-playlist-download",
+  )
+  try:
+    worker.start()
+  except RuntimeError:
+    with _playlist_jobs_lock:
+      job["status"] = "awaiting_selection"
+      job["message"] = "No se pudo iniciar la descarga. Puedes volver a intentarlo."
+      job["selection_limit"] = None
+      job["total"] = len(job.get("_entries") or [])
+    return jsonify({"status": "error", "message": job["message"]}), 503
+  return jsonify({"status": "accepted", "job": snapshot})
+
+
+@app.post("/playlist/status")
+def playlist_status():
+  payload = request.get_json(silent=True)
+  job_id = str((payload or {}).get("job_id") or "") if isinstance(payload, dict) else ""
+  if not re.fullmatch(r"[0-9a-f]{32}", job_id):
+    return jsonify({"status": "error", "message": "La sesión de lista no es válida."}), 400
+  with _playlist_jobs_lock:
+    _prune_playlist_jobs_locked()
+    job = _playlist_jobs.get(job_id)
+    if not job:
+      return jsonify({
+          "status": "error",
+          "message": "La sesión de lista venció. Inicia de nuevo desde la página de la lista.",
+      }), 410
+    snapshot = _playlist_snapshot(job)
+  return jsonify({"status": "ready", "job": snapshot})
 
 
 @app.post("/select")

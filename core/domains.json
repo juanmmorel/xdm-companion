@@ -16,6 +16,25 @@
         "adapter": "youtube",
         "module": "youtube.js",
         "page_events": ["yt-navigate-start", "yt-navigate-finish", "yt-page-data-updated"],
+        "playlist": {
+          "enabled": true,
+          "query_parameters": ["list"],
+          "path_prefixes": ["/playlist"],
+          "anchor_selectors": [
+            "ytd-playlist-panel-renderer #end-actions",
+            "ytd-playlist-panel-renderer #playlist-actions",
+            "ytd-playlist-panel-renderer #top-level-buttons-computed",
+            "ytd-playlist-header-renderer #top-level-buttons-computed",
+            "ytd-playlist-header-renderer #play-button",
+            "ytd-playlist-header-renderer"
+          ],
+          "insert_before_selectors": [
+            "ytd-menu-renderer",
+            "#menu",
+            "button[aria-haspopup='menu']"
+          ],
+          "url_template": "https://www.youtube.com/playlist?list={playlist_id}"
+        },
         "cookie_queries": [
           { "kind": "playback_host", "url": "https://www.youtube.com/" },
           { "kind": "apex_host", "url": "https://youtube.com/" },
@@ -76,6 +95,10 @@
         "adapter": "youtube",
         "extractor_key": "Youtube",
         "max_page_url_length": 8192,
+        "playlist": {
+          "enabled": true,
+          "max_items": 5000
+        },
         "verbose_diagnostics": true,
         "check_authenticated_session": true,
         "extractor_args": {

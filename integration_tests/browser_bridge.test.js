@@ -40,25 +40,49 @@ class FakeElement {
     this.classList = new FakeClassList();
     this.isConnected = true;
     this.disabled = false;
-    this.textContent = "";
+    this._textContent = "";
     this.parentElement = null;
     this.shadowRoot = null;
     this.hover = false;
   }
   append(...items) {
     for (const item of items) {
+      if (item instanceof FakeElement && item.parentElement) {
+        const previous = item.parentElement.children.indexOf(item);
+        if (previous >= 0) item.parentElement.children.splice(previous, 1);
+      }
       this.children.push(item);
       if (item instanceof FakeElement) item.parentElement = this;
     }
   }
+  insertBefore(item, before) {
+    if (item instanceof FakeElement && item.parentElement) {
+      const previous = item.parentElement.children.indexOf(item);
+      if (previous >= 0) item.parentElement.children.splice(previous, 1);
+    }
+    const index = this.children.indexOf(before);
+    if (index < 0) this.children.push(item);
+    else this.children.splice(index, 0, item);
+    if (item instanceof FakeElement) item.parentElement = this;
+    return item;
+  }
   replaceChildren(...items) {
+    for (const child of this.children) if (child instanceof FakeElement) child.parentElement = null;
     this.children = [];
     this.append(...items);
+  }
+  get textContent() {
+    return this._textContent + this.children.map(child => child?.textContent || "").join("");
+  }
+  set textContent(value) {
+    this._textContent = String(value ?? "");
+    for (const child of this.children) if (child instanceof FakeElement) child.parentElement = null;
+    this.children = [];
   }
   setAttribute(name, value) { this.attributes.set(name, String(value)); }
   removeAttribute(name) { this.attributes.delete(name); }
   getBoundingClientRect() {
-    return { left: 0, right: 252, top: 0, bottom: 38, width: 252, height: 38 };
+    return this.rect || { left: 0, right: 252, top: 0, bottom: 38, width: 252, height: 38 };
   }
   addEventListener(name, callback, options = false) {
     if (!this.listeners.has(name)) this.listeners.set(name, []);
@@ -117,14 +141,20 @@ class FakeElement {
     while (current.parentElement) current = current.parentElement;
     return current;
   }
-  matches(selector) { return selector === ":hover" && this.hover; }
+  matches(selector) {
+    if (selector === ":hover") return this.hover;
+    if (selector === "*") return true;
+    if (selector.startsWith("#")) return this.id === selector.slice(1);
+    const tagAndId = selector.match(/^([a-z][a-z0-9-]*)(?:#([a-z0-9_-]+))?$/i);
+    return Boolean(tagAndId && this.tagName === tagAndId[1].toUpperCase()
+      && (!tagAndId[2] || this.id === tagAndId[2]));
+  }
   querySelectorAll(selector) {
     const matches = [];
     const visit = node => {
       for (const child of node.children || []) {
         if (!(child instanceof FakeElement)) continue;
-        if (selector === "button" && child.tagName === "BUTTON") matches.push(child);
-        if (selector === "video, *" || selector === "*") matches.push(child);
+        if (selector.split(",").some(part => child.matches(part.trim()))) matches.push(child);
         visit(child);
       }
     };
@@ -164,6 +194,7 @@ class FakeDocument {
   createElement(tagName) { return new FakeElement(tagName); }
   createTextNode(text) { return { textContent: text }; }
   querySelectorAll(selector) { return this.documentElement.querySelectorAll(selector); }
+  querySelector(selector) { return this.documentElement.querySelector(selector); }
   addEventListener(name, callback) {
     if (!this.listeners.has(name)) this.listeners.set(name, []);
     this.listeners.get(name).push(callback);
@@ -189,6 +220,55 @@ function loadContentScript({
   }
   const document = new FakeDocument();
   const location = { href: pageUrl };
+  let playlistActions = null;
+  let playlistMenuButton = null;
+  let playlistLastPlaybackControl = null;
+  const parsedPageUrl = new URL(pageUrl);
+  if (/\/playlist(?:\?|$)/.test(pageUrl) || parsedPageUrl.searchParams.has("list")) {
+    const app = new FakeElement("ytd-app");
+    const appContent = app.attachShadow();
+    if (parsedPageUrl.pathname === "/watch" && parsedPageUrl.searchParams.has("list")) {
+      const panel = new FakeElement("ytd-playlist-panel-renderer");
+      const panelContent = panel.attachShadow();
+      const panelActions = new FakeElement("div");
+      panelActions.id = "playlist-actions";
+      const startActions = new FakeElement("div");
+      startActions.id = "start-actions";
+      const endActions = new FakeElement("div");
+      endActions.id = "end-actions";
+      const repeatButton = new FakeElement("button");
+      repeatButton.id = "repeat";
+      repeatButton.rect = { left: 1030, right: 1070, top: 190, bottom: 226, width: 40, height: 36 };
+      const shuffleButton = new FakeElement("button");
+      shuffleButton.id = "shuffle";
+      const overflowButton = new FakeElement("button");
+      overflowButton.id = "menu";
+      shuffleButton.rect = { left: 1100, right: 1140, top: 190, bottom: 226, width: 40, height: 36 };
+      overflowButton.rect = { left: 1280, right: 1324, top: 190, bottom: 226, width: 44, height: 36 };
+      startActions.append(repeatButton, shuffleButton);
+      endActions.append(overflowButton);
+      panelActions.append(startActions, endActions);
+      playlistActions = endActions;
+      playlistMenuButton = overflowButton;
+      playlistLastPlaybackControl = shuffleButton;
+      panelContent.append(panelActions);
+      appContent.append(panel);
+    } else {
+      const header = new FakeElement("ytd-playlist-header-renderer");
+      const headerContent = header.attachShadow();
+      playlistActions = new FakeElement("div");
+      playlistActions.id = "top-level-buttons-computed";
+      const playButton = new FakeElement("button");
+      playButton.id = "play-button";
+      const overflowButton = new FakeElement("button");
+      overflowButton.id = "menu";
+      playlistMenuButton = overflowButton;
+      playlistActions.append(playButton, overflowButton);
+      headerContent.append(playlistActions);
+      appContent.append(header);
+    }
+    document.documentElement.append(app);
+  }
   const browserWindow = {
     innerWidth: 1280,
     innerHeight: 800,
@@ -208,6 +288,7 @@ function loadContentScript({
     Date,
     location,
     document,
+    playlistActions,
     innerWidth: 1280,
     innerHeight: 800,
     setTimeout: (callback, delay) => {
@@ -229,6 +310,9 @@ function loadContentScript({
   return {
     document,
     location,
+    playlistActions,
+    playlistMenuButton,
+    playlistLastPlaybackControl,
     dispatchWindowEvent: name => browserWindow.dispatch(name),
     windowEventNames: () => [...windowListeners.keys()],
     observers,
@@ -355,6 +439,244 @@ test("the floating button supports callback-based Chrome messaging", async () =>
   assert.equal(messages.length, 1);
   assert.equal(shadow.getElementById("choices").children.length, 1);
   assert.equal(shadow.getElementById("status").textContent, "Elige una resolución:");
+});
+
+test("a playlist picker previews the count, offers adaptive limits, queues the selection, and shows progress", async () => {
+  const messages = [];
+  const {
+    document, playlistActions, playlistMenuButton, playlistLastPlaybackControl, runTimers, timerDelays,
+  } = loadContentScript({
+    pageUrl: "https://www.youtube.com/watch?v=Abcdefgh_01&list=PLexample",
+    onMessage: async message => {
+      messages.push(message);
+      if (message.type === "xdm-companion:start-playlist") {
+        return {
+          ok: true,
+          job: {
+            id: "c".repeat(32), status: "awaiting_selection", title: "Lista", total: 25,
+            downloadable_count: 25, processed: 0, queued: 0, skipped: 0, failed: 0, issues: [],
+          },
+        };
+      }
+      if (message.type === "xdm-companion:queue-playlist") {
+        return {
+          ok: true,
+          job: {
+            id: "c".repeat(32), status: "processing", title: "Lista", total: 20,
+            downloadable_count: 25, selection_limit: 20,
+            processed: 1, queued: 1, skipped: 0, failed: 0, current_title: "Segundo",
+            current_position: 2, issues: [],
+          },
+        };
+      }
+      return {
+        ok: true,
+        job: {
+          id: "c".repeat(32), status: "completed", title: "Lista", total: 20,
+          downloadable_count: 25, selection_limit: 20,
+          processed: 20, queued: 20, skipped: 0, failed: 0, issues: [],
+        },
+      };
+    },
+  });
+
+  const host = document.documentElement.children.find(element =>
+    element.getAttribute("aria-label") === "Descargar lista con XDM",
+  );
+  assert.ok(host, "the playlist control is mounted in the top-level overlay");
+  assert.equal(host.parentElement, document.documentElement);
+  const controlLeft = Number.parseFloat(host.style.left);
+  assert.ok(controlLeft >= playlistLastPlaybackControl.rect.right);
+  assert.ok(controlLeft + 86 <= playlistMenuButton.rect.left);
+  assert.ok(controlLeft >= 0, "the button is positioned in the gap before the playlist overflow menu");
+  const shadow = host.shadowRoot;
+  const trigger = shadow.getElementById("playlist-trigger");
+  assert.ok(trigger);
+  assert.match(trigger.getAttribute("aria-label"), /lista/i);
+  assert.match(shadow.children[0].textContent, /#playlist-status\s*\{[^}]*position:\s*fixed/s);
+  assert.match(host.style.cssText, /position:\s*fixed/);
+
+  trigger.dispatch("click");
+  await tick();
+  assert.equal(messages[0].type, "xdm-companion:start-playlist");
+  assert.equal(messages[0].pageUrl, "https://www.youtube.com/playlist?list=PLexample");
+  assert.match(shadow.getElementById("playlist-status").textContent, /25 videos con enlace/);
+  assert.match(shadow.getElementById("playlist-status").style.left, /px$/);
+  assert.match(shadow.getElementById("playlist-status").style.top, /px$/);
+  const playlistStyle = shadow.children[0].textContent;
+  assert.match(playlistStyle, /#playlist-status\s*\{[^}]*width: min\(252px, calc\(100vw - 16px\)\)/s);
+  assert.match(playlistStyle, /#playlist-menu-title\s*\{[^}]*color: #b9d9f6; font-weight: 650/s);
+  assert.match(playlistStyle, /\.playlist-choice\s*\{[^}]*display: flex; width: 100%[^}]*border: 0/);
+  assert.match(playlistStyle, /#playlist-choices\s*\{[^}]*max-height: 270px; overflow-y: auto/);
+  const options = shadow.getElementById("playlist-choices").children;
+  assert.equal(options.length, 3);
+  assert.deepEqual(options.map(option => option.textContent), [
+    "Descargar 10", "Descargar 20", "Descargar todos (25)",
+  ]);
+  assert.equal(options[0].disabled, false);
+  assert.equal(options[1].disabled, false);
+  assert.equal(options[2].disabled, false);
+  assert.ok(timerDelays().includes(5_000), "the choice menu closes after five seconds if left idle");
+
+  trigger.dispatch("click");
+  assert.equal(shadow.getElementById("playlist-widget").classList.contains("open"), true);
+  assert.equal(shadow.getElementById("playlist-choices").children.length, 3);
+  assert.equal(messages.length, 1, "repeated clicks keep the picker open without starting another preview");
+
+  options[1].dispatch("click");
+  await tick();
+  assert.equal(messages[1].type, "xdm-companion:queue-playlist");
+  assert.equal(messages[1].limit, 20);
+  assert.equal(shadow.getElementById("playlist-choices").getAttribute("hidden"), "");
+  assert.match(shadow.getElementById("playlist-status").textContent, /Enviando a XDM: 1 de 20/);
+  assert.ok(timerDelays().includes(5_000), "the selected-list progress closes after five seconds");
+
+  runTimers();
+  await tick();
+  assert.equal(messages[2].type, "xdm-companion:playlist-status");
+  assert.equal(messages[2].jobId, "c".repeat(32));
+  assert.match(shadow.getElementById("playlist-status").textContent, /20 en cola/);
+  assert.equal(shadow.getElementById("playlist-widget").classList.contains("open"), false);
+  assert.ok(timerDelays().includes(5_000), "the completion notice also closes after five seconds");
+
+  trigger.dispatch("click");
+  await tick();
+  assert.equal(messages[3].type, "xdm-companion:start-playlist");
+  assert.equal(shadow.getElementById("playlist-choices").children.length, 3);
+  assert.equal(shadow.getElementById("playlist-widget").classList.contains("open"), true);
+});
+
+test("playlist limits adapt at 20, 35, and 40 videos", async () => {
+  const cases = [
+    { count: 20, expected: ["Descargar 5", "Descargar 10", "Descargar 15", "Descargar todos (20)"] },
+    { count: 35, expected: ["Descargar 10", "Descargar 20", "Descargar todos (35)"] },
+    { count: 40, expected: ["Descargar 10", "Descargar 20", "Descargar 30", "Descargar todos (40)"] },
+  ];
+
+  for (const { count, expected } of cases) {
+    const { document } = loadContentScript({
+      pageUrl: `https://www.youtube.com/playlist?list=PL${count}`,
+      onMessage: async () => ({
+        ok: true,
+        job: {
+          id: "a".repeat(32), status: "awaiting_selection", title: "Lista", total: count,
+          downloadable_count: count, processed: 0, queued: 0, skipped: 0, failed: 0, issues: [],
+        },
+      }),
+    });
+    const host = document.documentElement.children.find(element =>
+      element.getAttribute("aria-label") === "Descargar lista con XDM",
+    );
+    const shadow = host.shadowRoot;
+    shadow.getElementById("playlist-trigger").dispatch("click");
+    await tick();
+    assert.deepEqual(
+      shadow.getElementById("playlist-choices").children.map(option => option.textContent),
+      expected,
+    );
+  }
+});
+
+test("playlist controls are found through nested YouTube shadow roots", () => {
+  const { document, playlistMenuButton } = loadContentScript({
+    pageUrl: "https://www.youtube.com/playlist?list=PLexample",
+  });
+  const host = document.documentElement.children.find(element =>
+    element.getAttribute("aria-label") === "Descargar lista con XDM",
+  );
+  assert.ok(host, "the XDM playlist control is created after finding its anchor inside nested roots");
+  assert.equal(host.style.left, `${Math.max(8, playlistMenuButton.getBoundingClientRect().left - 92)}px`);
+});
+
+test("an empty playlist only shows the disabled download-all choice", async () => {
+  const { document } = loadContentScript({
+    pageUrl: "https://www.youtube.com/playlist?list=PLempty",
+    onMessage: async () => ({
+      ok: true,
+      job: {
+        id: "e".repeat(32), status: "awaiting_selection", title: "Lista vacía", total: 0,
+        downloadable_count: 0, processed: 0, queued: 0, skipped: 0, failed: 0, issues: [],
+      },
+    }),
+  });
+  const host = document.documentElement.children.find(element =>
+    element.getAttribute("aria-label") === "Descargar lista con XDM",
+  );
+  const shadow = host.shadowRoot;
+  shadow.getElementById("playlist-trigger").dispatch("click");
+  await tick();
+
+  const choices = shadow.getElementById("playlist-choices").children;
+  assert.equal(choices.length, 1);
+  assert.equal(choices[0].textContent, "Descargar todos (0)");
+  assert.equal(choices[0].disabled, true);
+  assert.match(shadow.getElementById("playlist-status").textContent, /0 videos con enlace/);
+});
+
+test("playlists with fewer than five videos only show download all", async () => {
+  const { document } = loadContentScript({
+    pageUrl: "https://www.youtube.com/playlist?list=PLfour",
+    onMessage: async () => ({
+      ok: true,
+      job: {
+        id: "4".repeat(32), status: "awaiting_selection", title: "Lista pequeña", total: 4,
+        downloadable_count: 4, processed: 0, queued: 0, skipped: 0, failed: 0, issues: [],
+      },
+    }),
+  });
+  const host = document.documentElement.children.find(element =>
+    element.getAttribute("aria-label") === "Descargar lista con XDM",
+  );
+  const shadow = host.shadowRoot;
+  shadow.getElementById("playlist-trigger").dispatch("click");
+  await tick();
+
+  const choices = shadow.getElementById("playlist-choices").children;
+  assert.equal(choices.length, 1);
+  assert.equal(choices[0].textContent, "Descargar todos (4)");
+  assert.equal(choices[0].disabled, false);
+});
+
+test("download all stays available when a playlist has fewer than ten videos", async () => {
+  const { document } = loadContentScript({
+    pageUrl: "https://www.youtube.com/playlist?list=PLsmall",
+    onMessage: async () => ({
+      ok: true,
+      job: {
+        id: "s".repeat(32), status: "awaiting_selection", title: "Lista pequeña", total: 6,
+        downloadable_count: 6, processed: 0, queued: 0, skipped: 0, failed: 0, issues: [],
+      },
+    }),
+  });
+  const host = document.documentElement.children.find(element =>
+    element.getAttribute("aria-label") === "Descargar lista con XDM",
+  );
+  const shadow = host.shadowRoot;
+  shadow.getElementById("playlist-trigger").dispatch("click");
+  await tick();
+
+  const choices = shadow.getElementById("playlist-choices").children;
+  assert.equal(choices.length, 4);
+  assert.deepEqual(choices.map(choice => choice.textContent), [
+    "Descargar 5", "Descargar 10", "Descargar 15", "Descargar todos (6)",
+  ]);
+  assert.equal(choices[0].disabled, false);
+  assert.equal(choices[1].disabled, true);
+  assert.equal(choices[2].disabled, true);
+  assert.equal(choices[3].disabled, false);
+});
+
+test("playlist preview videos do not show the single-video floating picker", () => {
+  const video = new FakeVideo();
+  const { document } = loadContentScript({
+    pageUrl: "https://www.youtube.com/playlist?list=PLexample",
+    videos: [video],
+  });
+  video.dispatch("pointerenter");
+  const singleVideoButton = document.documentElement.children.find(element =>
+    element.getAttribute("aria-label") === "XDM Companion",
+  );
+  assert.equal(singleVideoButton, undefined);
 });
 
 test("a missing extension runtime shows a reload hint instead of a sendMessage TypeError", async () => {
@@ -567,6 +889,82 @@ test("preview format requests use the canonical URL and cookies without reading 
   await request(false, canonicalUrl);
   assert.equal(playerReadCount, 1, "normal playback pages still contribute matching player metadata");
   assert.equal(payloads[1].youtube_playback.audio_track.name, "Original");
+});
+
+test("playlist messages send browser cookies and poll the local playlist job", async () => {
+  let onMessage;
+  const requests = [];
+  const context = {
+    URL,
+    navigator: { languages: ["es-DO", "es"], language: "es-DO", userAgent: "Test browser" },
+    chrome: {
+      cookies: { getAll: async () => [{ name: "SID", value: "session", domain: ".youtube.com", path: "/" }] },
+      runtime: { onMessage: { addListener: callback => { onMessage = callback; } } },
+    },
+    fetch: async (url, options) => {
+      requests.push({ url, options });
+      return {
+        ok: true,
+        status: 200,
+        json: async () => url.endsWith("/playlist/start")
+          ? { status: "accepted", job: { id: "d".repeat(32), status: "enumerating" } }
+          : url.endsWith("/playlist/queue")
+            ? { status: "accepted", job: { id: "d".repeat(32), status: "processing", total: 20 } }
+            : { status: "ready", job: { id: "d".repeat(32), status: "completed", queued: 20 } },
+      };
+    },
+  };
+  loadBackground(context);
+  const pageUrl = "https://www.youtube.com/playlist?list=PLexample";
+  const send = message => new Promise(resolve => onMessage(message, {
+    tab: { id: 8, url: pageUrl, title: "Lista" },
+  }, resolve));
+
+  const started = await send({ type: "xdm-companion:start-playlist", pageUrl, title: "Lista" });
+  assert.equal(started.ok, true);
+  assert.equal(requests[0].url, "http://127.0.0.1:21121/playlist/start");
+  const payload = JSON.parse(requests[0].options.body);
+  assert.equal(payload.url, pageUrl);
+  assert.equal(payload.title, "Lista");
+  assert.equal(payload.user_agent, "Test browser");
+  assert.ok(payload.cookies.some(cookie => cookie.name === "SID"));
+  assert.equal("youtube_playback" in payload, false, "playlist resolution must not reuse the active video's player state");
+
+  const queued = await send({
+    type: "xdm-companion:queue-playlist", pageUrl, jobId: "d".repeat(32), limit: 20,
+  });
+  assert.equal(queued.ok, true);
+  assert.equal(requests[1].url, "http://127.0.0.1:21121/playlist/queue");
+  const queuePayload = JSON.parse(requests[1].options.body);
+  assert.equal(queuePayload.job_id, "d".repeat(32));
+  assert.equal(queuePayload.limit, 20);
+  assert.ok(queuePayload.cookies.some(cookie => cookie.name === "SID"));
+
+  const status = await send({ type: "xdm-companion:playlist-status", jobId: "d".repeat(32) });
+  assert.equal(status.ok, true);
+  assert.equal(requests[2].url, "http://127.0.0.1:21121/playlist/status");
+  assert.deepEqual(JSON.parse(requests[2].options.body), { job_id: "d".repeat(32) });
+});
+
+test("a stale service gives a local update instruction for playlist requests", async () => {
+  let onMessage;
+  const context = {
+    URL,
+    navigator: { languages: ["es"], language: "es", userAgent: "Test browser" },
+    chrome: {
+      cookies: { getAll: async () => [] },
+      runtime: { onMessage: { addListener: callback => { onMessage = callback; } } },
+    },
+    fetch: async () => ({ ok: false, status: 404, json: async () => ({}) }),
+  };
+  loadBackground(context);
+  const response = await new Promise(resolve => onMessage({
+    type: "xdm-companion:start-playlist",
+    pageUrl: "https://www.youtube.com/playlist?list=PLexample",
+  }, { tab: { url: "https://www.youtube.com/playlist?list=PLexample", title: "Lista" } }, resolve));
+
+  assert.equal(response.ok, false);
+  assert.match(response.message, /bash scripts\/install\.sh/);
 });
 
 test("the missing background receiver is shown as a clear extension reload instruction", async () => {

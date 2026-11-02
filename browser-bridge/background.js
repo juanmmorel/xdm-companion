@@ -127,6 +127,55 @@ async function selectFormat(message) {
   });
 }
 
+async function startPlaylist(message, sender) {
+  const pageUrl = message.pageUrl || (sender.tab && sender.tab.url);
+  const provider = pageUrl && siteProviderForUrl(pageUrl);
+  if (!provider || provider.browser?.playlist?.enabled !== true) {
+    return { ok: false, message: "Esta página no tiene habilitada la descarga de listas." };
+  }
+  const browserSession = await browserCookies(pageUrl, provider);
+  const browserLanguages = Array.isArray(navigator.languages) && navigator.languages.length
+    ? navigator.languages
+    : [navigator.language].filter(Boolean);
+  return sendToCompanion("/playlist/start", {
+    url: pageUrl,
+    cookies: browserSession.cookies,
+    user_agent: navigator.userAgent,
+    accept_language: browserLanguages.join(","),
+    title: message.title || (sender.tab && sender.tab.title) || "",
+  });
+}
+
+async function queuePlaylist(message, sender) {
+  const pageUrl = message.pageUrl || (sender.tab && sender.tab.url);
+  const provider = pageUrl && siteProviderForUrl(pageUrl);
+  if (!provider || provider.browser?.playlist?.enabled !== true) {
+    return { ok: false, message: "Esta página no tiene habilitada la descarga de listas." };
+  }
+  if (typeof message.jobId !== "string" || !/^[a-f0-9]{32}$/.test(message.jobId)) {
+    return { ok: false, message: "La vista previa de la lista venció. Vuelve a abrirla." };
+  }
+  const browserSession = await browserCookies(pageUrl, provider);
+  const browserLanguages = Array.isArray(navigator.languages) && navigator.languages.length
+    ? navigator.languages
+    : [navigator.language].filter(Boolean);
+  return sendToCompanion("/playlist/queue", {
+    url: pageUrl,
+    job_id: message.jobId,
+    limit: message.limit,
+    cookies: browserSession.cookies,
+    user_agent: navigator.userAgent,
+    accept_language: browserLanguages.join(","),
+  });
+}
+
+function playlistStatus(message) {
+  if (typeof message.jobId !== "string" || !/^[a-f0-9]{32}$/.test(message.jobId)) {
+    return Promise.resolve({ ok: false, message: "La sesión de lista no es válida." });
+  }
+  return sendToCompanion("/playlist/status", { job_id: message.jobId });
+}
+
 async function sendToCompanion(path, payload) {
   try {
     const response = await fetch(`${COMPANION_BASE_URL}${path}`, {
@@ -138,7 +187,11 @@ async function sendToCompanion(path, payload) {
     if (!response.ok) {
       return {
         ok: false,
-        message: result.message || "XDM Companion no pudo procesar el video.",
+        message: result.message || (
+          response.status === 404 && path.startsWith("/playlist/")
+            ? "El servicio instalado no reconoce las listas. Actualízalo desde el proyecto local con bash scripts/install.sh y vuelve a iniciar el servicio."
+            : "XDM Companion no pudo procesar el video."
+        ),
       };
     }
     return { ok: true, ...result };
@@ -152,12 +205,24 @@ async function sendToCompanion(path, payload) {
 }
 
 EXTENSION_API.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (!message || !["xdm-companion:get-formats", "xdm-companion:select-format"].includes(message.type)) {
+  if (!message || ![
+    "xdm-companion:get-formats",
+    "xdm-companion:select-format",
+    "xdm-companion:start-playlist",
+    "xdm-companion:queue-playlist",
+    "xdm-companion:playlist-status",
+  ].includes(message.type)) {
     return false;
   }
   const operation = message.type === "xdm-companion:get-formats"
     ? requestFormats(message, sender || {})
-    : selectFormat(message);
+    : message.type === "xdm-companion:select-format"
+      ? selectFormat(message)
+      : message.type === "xdm-companion:start-playlist"
+        ? startPlaylist(message, sender || {})
+        : message.type === "xdm-companion:queue-playlist"
+          ? queuePlaylist(message, sender || {})
+        : playlistStatus(message);
   void operation.then(
     result => {
       if (typeof sendResponse === "function") sendResponse(result);

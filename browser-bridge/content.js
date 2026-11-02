@@ -14,6 +14,10 @@
   let hideTimer = 0;
   let menuAutoCloseTimer = 0;
   let ui = null;
+  let playlistUi = null;
+  let playlistPollTimer = 0;
+  let playlistMenuTimer = 0;
+  let playlistStatusTimer = 0;
   let cachedFormats = new Map();
   let pendingFormats = new Map();
   let recentFormatFailures = new Map();
@@ -315,12 +319,15 @@
   }
 
   function prefetchVideo(video) {
+    if (isPlaylistListingPage(location.href)) return;
     const target = videoTargetFor(video);
     if (target) prefetchFormats(target.pageUrl, target.title, target.isPreview);
   }
 
   function syncPageContext() {
     const pageUrl = location.href;
+    syncPlaylistControl();
+    if (isPlaylistListingPage(pageUrl)) hideVideoPicker();
     if (pageUrl === observedPageUrl) return false;
     observedPageUrl = pageUrl;
     pageGeneration += 1;
@@ -351,6 +358,501 @@
       prefetchFormats(activePageUrl, activeTitle, activeIsPreview);
     }
     return true;
+  }
+
+  function playlistTargetFor(rawUrl) {
+    try {
+      const url = new URL(rawUrl);
+      const provider = providerForUrl(rawUrl);
+      const config = provider?.browser?.playlist || {};
+      if (config.enabled !== true) return null;
+      const queryParameters = Array.isArray(config.query_parameters)
+        ? config.query_parameters : [];
+      const pathPrefixes = Array.isArray(config.path_prefixes)
+        ? config.path_prefixes : [];
+      const playlistParameter = queryParameters.find(parameter =>
+        typeof parameter === "string" && Boolean(url.searchParams.get(parameter)),
+      );
+      const playlistId = playlistParameter ? url.searchParams.get(playlistParameter) : "";
+      const hasQuery = Boolean(playlistId);
+      const hasPath = pathPrefixes.some(prefix =>
+        typeof prefix === "string" && prefix && url.pathname.startsWith(prefix),
+      );
+      let pageUrl = url.href;
+      const template = String(config.url_template || "");
+      if (hasQuery && template.includes("{playlist_id}")) {
+        pageUrl = template.replace("{playlist_id}", encodeURIComponent(playlistId));
+      }
+      return hasQuery || hasPath
+        ? { provider, pageUrl, isListingPage: hasPath }
+        : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function isPlaylistListingPage(rawUrl) {
+    return Boolean(playlistTargetFor(rawUrl)?.isListingPage);
+  }
+
+  function createPlaylistUi() {
+    if (playlistUi || !document.documentElement) return playlistUi;
+    const host = document.createElement("div");
+    host.setAttribute("aria-label", "Descargar lista con XDM");
+    host.style.cssText = [
+      "all:initial",
+      "position:fixed",
+      "display:block",
+      "margin:0",
+      "z-index:2147483647",
+      "pointer-events:auto",
+    ].join(";");
+    const shadow = host.attachShadow({ mode: "open" });
+    const style = document.createElement("style");
+    style.textContent = `
+      :host { all: initial; color-scheme: light; }
+      #playlist-widget {
+        position: relative; z-index: 20;
+        display: flex; flex-direction: column; align-items: flex-start; gap: 7px;
+        pointer-events: auto; font: 13px/1.35 system-ui, sans-serif; color: #f8fbff;
+      }
+      #playlist-trigger {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 86px; max-width: calc(100vw - 24px); padding: 0; border: 0;
+        background: transparent; cursor: pointer; pointer-events: auto;
+        filter: drop-shadow(0 2px 8px rgba(0,0,0,.35));
+      }
+      #playlist-trigger img { display: block; width: 100%; height: auto; }
+      #playlist-trigger:disabled { opacity: .65; cursor: wait; }
+      #playlist-trigger:focus-visible { outline: 2px solid #76d7ff; outline-offset: 2px; }
+      #playlist-status {
+        display: none; position: fixed; top: 0; left: 0;
+        width: min(252px, calc(100vw - 16px)); box-sizing: border-box;
+        max-height: min(360px, calc(100vh - 64px)); overflow: hidden;
+        border: 1px solid rgba(255,255,255,.18); border-radius: 10px;
+        background: #101923; color: #f8fbff; box-shadow: 0 8px 28px rgba(0,0,0,.5);
+        pointer-events: auto; z-index: 2147483647;
+      }
+      #playlist-widget.open #playlist-status { display: block; }
+      #playlist-widget[hidden] { display: none; }
+      #playlist-menu-title { padding: 10px 12px 8px; color: #b9d9f6; font-weight: 650; }
+      #playlist-message { padding: 2px 12px 10px; color: #c4cfdd; overflow-wrap: anywhere; }
+      #playlist-choices {
+        max-height: 270px; overflow-y: auto; padding: 0 6px 6px;
+      }
+      #playlist-choices[hidden] { display: none; }
+      .playlist-choice {
+        display: flex; width: 100%; align-items: center; justify-content: space-between;
+        gap: 12px; box-sizing: border-box; padding: 9px 8px; border: 0;
+        border-radius: 6px; background: transparent; color: #fff; text-align: left;
+        font: 500 13px system-ui,sans-serif; cursor: pointer;
+      }
+      .playlist-choice:hover:not(:disabled), .playlist-choice:focus-visible { background: #23476a; outline: none; }
+      .playlist-choice:disabled { opacity: .55; cursor: wait; }
+    `;
+    const widget = document.createElement("div");
+    widget.id = "playlist-widget";
+    widget.setAttribute("hidden", "");
+    const trigger = document.createElement("button");
+    trigger.id = "playlist-trigger";
+    trigger.type = "button";
+    trigger.title = "Enviar la lista a XDM en orden, con la mejor calidad compatible por video";
+    trigger.setAttribute("aria-label", "Enviar lista a XDM con la mejor calidad compatible por video");
+    trigger.setAttribute("aria-expanded", "false");
+    const art = document.createElement("img");
+    art.alt = "";
+    art.setAttribute("aria-hidden", "true");
+    const runtime = extensionRuntime();
+    if (typeof runtime?.getURL === "function") art.src = runtime.getURL("icons/xdm-download-button.png");
+    else {
+      art.style.display = "none";
+      trigger.textContent = "XDM";
+    }
+    const status = document.createElement("div");
+    status.id = "playlist-status";
+    status.setAttribute("role", "dialog");
+    status.setAttribute("aria-label", "Descargar lista con XDM");
+    const menuTitle = document.createElement("div");
+    menuTitle.id = "playlist-menu-title";
+    menuTitle.textContent = "Descargar lista con XDM";
+    const message = document.createElement("div");
+    message.id = "playlist-message";
+    message.setAttribute("role", "status");
+    message.textContent = "Pulsa el botón para buscar los videos de la lista.";
+    const choices = document.createElement("div");
+    choices.id = "playlist-choices";
+    choices.setAttribute("role", "group");
+    choices.setAttribute("aria-label", "Cantidad de videos para enviar a XDM");
+    choices.setAttribute("hidden", "");
+    status.append(menuTitle, message, choices);
+    trigger.append(art);
+    widget.append(trigger, status);
+    shadow.append(style, widget);
+    document.documentElement.append(host);
+    playlistUi = {
+      host, shadow, widget, trigger, status, message, choices, pageUrl: "", jobId: "", anchor: null,
+      phase: "idle", downloadableCount: 0,
+    };
+    trigger.addEventListener("click", event => {
+      consumeEvent(event);
+      openPlaylistMenu();
+    }, true);
+    widget.addEventListener("pointerdown", event => event.stopPropagation());
+    widget.addEventListener("click", event => event.stopPropagation());
+    window.addEventListener("resize", repositionPlaylistUi, { passive: true });
+    window.addEventListener("scroll", repositionPlaylistUi, { passive: true, capture: true });
+    return playlistUi;
+  }
+
+  function queryPlaylistSelector(selector) {
+    try {
+      const findInOpenRoots = (root, query) => {
+        if (!root || typeof root.querySelector !== "function") return null;
+        try {
+          const direct = root.querySelector(query);
+          if (direct) return direct;
+        } catch (_) {}
+        if (typeof root.querySelectorAll !== "function") return null;
+        let nodes = [];
+        try { nodes = root.querySelectorAll("*"); } catch (_) {}
+        for (const node of nodes) {
+          if (!node.shadowRoot) continue;
+          const nested = findInOpenRoots(node.shadowRoot, query);
+          if (nested) return nested;
+        }
+        return null;
+      };
+      const separator = selector.indexOf(" ");
+      if (separator < 0) return findInOpenRoots(document, selector);
+      const host = findInOpenRoots(document, selector.slice(0, separator));
+      const innerSelector = selector.slice(separator + 1).trim();
+      if (!host) return null;
+      return findInOpenRoots(host.shadowRoot || host, innerSelector);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function playlistAnchorFor(provider) {
+    const selectors = Array.isArray(provider?.browser?.playlist?.anchor_selectors)
+      ? provider.browser.playlist.anchor_selectors : [];
+    for (const selector of selectors) {
+      const element = queryPlaylistSelector(selector);
+      if (!element) continue;
+      return element.tagName === "BUTTON" ? element.parentElement || element : element;
+    }
+    return null;
+  }
+
+  function playlistInsertionPoint(anchor, provider) {
+    const selectors = Array.isArray(provider?.browser?.playlist?.insert_before_selectors)
+      ? provider.browser.playlist.insert_before_selectors : [];
+    for (const selector of selectors) {
+      let element = null;
+      try { element = anchor.querySelector(selector); } catch (_) {}
+      if (element) return element;
+    }
+    return null;
+  }
+
+  function positionPlaylistMenu() {
+    if (!playlistUi || !playlistUi.widget.classList.contains("open")) return;
+    const triggerRect = playlistUi.trigger.getBoundingClientRect();
+    const viewportWidth = Number(window.innerWidth || globalThis.innerWidth) || 0;
+    const viewportHeight = Number(window.innerHeight || globalThis.innerHeight) || 0;
+    if (!viewportWidth || !viewportHeight) return;
+    const menuRect = playlistUi.status.getBoundingClientRect();
+    const menuWidth = Math.min(menuRect.width || 300, viewportWidth - 16);
+    const menuHeight = Math.min(menuRect.height || 240, viewportHeight - 16);
+    const left = Math.max(8, Math.min(triggerRect.right - menuWidth, viewportWidth - menuWidth - 8));
+    let top = triggerRect.bottom + 6;
+    if (top + menuHeight > viewportHeight - 8) {
+      top = Math.max(8, triggerRect.top - menuHeight - 6);
+    }
+    playlistUi.status.style.left = `${left}px`;
+    playlistUi.status.style.top = `${top}px`;
+  }
+
+  function repositionPlaylistUi() {
+    syncPlaylistControl();
+    positionPlaylistMenu();
+  }
+
+  function positionPlaylistControl(anchor, before) {
+    if (!playlistUi || !anchor) return;
+    const reference = before || anchor;
+    const rect = reference.getBoundingClientRect();
+    const viewportWidth = Number(window.innerWidth || globalThis.innerWidth) || 0;
+    const viewportHeight = Number(window.innerHeight || globalThis.innerHeight) || 0;
+    if (!viewportWidth || !viewportHeight || (!rect.width && !rect.height)) return;
+    const buttonWidth = 86;
+    const buttonHeight = 30;
+    const desiredLeft = before ? rect.left - buttonWidth - 6 : rect.right - buttonWidth;
+    const left = Math.max(8, Math.min(desiredLeft, viewportWidth - buttonWidth - 8));
+    const top = Math.max(8, Math.min(
+      rect.top + (rect.height - buttonHeight) / 2,
+      viewportHeight - buttonHeight - 8,
+    ));
+    playlistUi.host.style.left = `${left}px`;
+    playlistUi.host.style.top = `${top}px`;
+  }
+
+  function syncPlaylistControl() {
+    if (typeof window !== "undefined" && window.top && window.top !== window) return;
+    const target = playlistTargetFor(location.href);
+    if (!target) {
+      if (playlistUi) {
+        playlistUi.widget.setAttribute("hidden", "");
+        playlistUi.widget.classList.remove("open");
+      }
+      return;
+    }
+    const anchor = playlistAnchorFor(target.provider);
+    // Align the fixed control with the playlist actions so it stays above the
+    // page's overflow clipping while occupying the slot before the menu.
+    if (!anchor) {
+      if (playlistUi) playlistUi.widget.setAttribute("hidden", "");
+      return;
+    }
+    const controls = createPlaylistUi();
+    if (!controls) return;
+    controls.pageUrl = target.pageUrl;
+    const before = playlistInsertionPoint(anchor, target.provider);
+    if (controls.host.parentElement !== document.documentElement) document.documentElement.append(controls.host);
+    controls.anchor = anchor;
+    controls.before = before;
+    positionPlaylistControl(anchor, before);
+    controls.widget.removeAttribute("hidden");
+  }
+
+  function hideVideoPicker() {
+    cancelHide();
+    if (!ui) {
+      activeVideo = null;
+      return;
+    }
+    ui.widget.classList.remove("visible", "open");
+    ui.widget.setAttribute("hidden", "");
+    ui.trigger.setAttribute("aria-expanded", "false");
+    activeVideo = null;
+  }
+
+  function renderPlaylistStatus(job) {
+    if (!playlistUi || !job) return;
+    if (playlistStatusTimer) clearTimeout(playlistStatusTimer);
+    playlistStatusTimer = 0;
+    const total = job.total !== null && job.total !== undefined && Number.isFinite(Number(job.total))
+      ? Number(job.total) : null;
+    if (job.status === "enumerating") {
+      playlistUi.phase = "previewing";
+      playlistUi.choices.setAttribute("hidden", "");
+      playlistUi.message.textContent = "Leyendo la lista de reproducción…";
+    } else if (job.status === "awaiting_selection") {
+      playlistUi.phase = "ready";
+      playlistUi.downloadableCount = Number(job.downloadable_count) || 0;
+      playlistUi.trigger.disabled = false;
+      playlistUi.message.textContent = `Se detectaron ${playlistUi.downloadableCount} videos con enlace en esta lista.`
+        + (playlistUi.downloadableCount ? " Elige cuántos enviar a XDM." : "");
+      renderPlaylistChoices(playlistUi.downloadableCount);
+      playlistUi.choices.removeAttribute("hidden");
+      schedulePlaylistMenuAutoClose();
+    } else if (["completed", "completed_with_issues"].includes(job.status)) {
+      playlistUi.phase = "complete";
+      playlistUi.choices.setAttribute("hidden", "");
+      const totalLabel = total === null ? job.processed : total;
+      playlistUi.message.textContent =
+        `Lista procesada: ${job.queued} en cola, ${job.skipped} omitidos y ${job.failed} fallidos de ${totalLabel}.`;
+      playlistUi.trigger.disabled = false;
+      if (Array.isArray(job.issues) && job.issues.length) {
+        const sample = job.issues.slice(0, 4).map(issue =>
+          `${issue.position}. ${issue.title}: ${issue.reason}`,
+        ).join(" · ");
+        playlistUi.message.textContent += ` Detalles: ${sample}`;
+      }
+      playlistStatusTimer = setTimeout(closePlaylistMenu, MENU_AUTO_CLOSE_MS);
+    } else if (job.status === "failed") {
+      playlistUi.phase = "failed";
+      playlistUi.choices.setAttribute("hidden", "");
+      playlistUi.message.textContent = job.message || "No se pudo procesar la lista.";
+      playlistUi.trigger.disabled = false;
+      playlistStatusTimer = setTimeout(closePlaylistMenu, MENU_AUTO_CLOSE_MS);
+    } else {
+      playlistUi.phase = "processing";
+      playlistUi.choices.setAttribute("hidden", "");
+      const current = job.current_title ? ` · ${job.current_title}` : "";
+      playlistUi.message.textContent =
+        `Enviando a XDM: ${job.processed} de ${total ?? "…"}${current}. `
+        + `${job.queued} en cola, ${job.skipped} omitidos, ${job.failed} fallidos.`;
+      playlistUi.trigger.disabled = false;
+    }
+    positionPlaylistMenu();
+  }
+
+  function renderPlaylistChoices(count) {
+    if (!playlistUi) return;
+    playlistUi.choices.replaceChildren();
+    const limits = count < 5
+      ? ["all"]
+      : count <= 20
+        ? [5, 10, 15, "all"]
+        : count < 40
+          ? [10, 20, "all"]
+          : [10, 20, 30, "all"];
+    for (const limit of limits) {
+      const choice = document.createElement("button");
+      choice.type = "button";
+      choice.className = "playlist-choice";
+      choice.setAttribute("data-limit", String(limit));
+      if (limit === "all") {
+        choice.textContent = `Descargar todos (${count})`;
+        choice.disabled = count < 1;
+      } else {
+        choice.textContent = `Descargar ${limit}`;
+        choice.disabled = count < limit;
+      }
+      choice.addEventListener("click", event => {
+        consumeEvent(event);
+        void queuePlaylistSelection(limit);
+      }, true);
+      playlistUi.choices.append(choice);
+    }
+  }
+
+  function closePlaylistMenu() {
+    if (playlistMenuTimer) clearTimeout(playlistMenuTimer);
+    playlistMenuTimer = 0;
+    if (playlistUi) {
+      playlistUi.widget.classList.remove("open");
+      playlistUi.trigger.setAttribute("aria-expanded", "false");
+    }
+  }
+
+  function schedulePlaylistMenuAutoClose() {
+    if (playlistMenuTimer) clearTimeout(playlistMenuTimer);
+    playlistMenuTimer = setTimeout(closePlaylistMenu, MENU_AUTO_CLOSE_MS);
+  }
+
+  function openPlaylistMenu() {
+    const controls = playlistUi;
+    if (!controls) return;
+    controls.widget.classList.add("open");
+    controls.trigger.setAttribute("aria-expanded", "true");
+    if (["idle", "failed", "complete"].includes(controls.phase)) {
+      void startPlaylistPreview();
+    } else if (controls.phase === "ready") {
+      renderPlaylistChoices(controls.downloadableCount);
+      controls.choices.removeAttribute("hidden");
+      schedulePlaylistMenuAutoClose();
+    } else {
+      schedulePlaylistMenuAutoClose();
+    }
+    positionPlaylistMenu();
+  }
+
+  function schedulePlaylistPoll(jobId) {
+    if (playlistPollTimer) clearTimeout(playlistPollTimer);
+    playlistPollTimer = setTimeout(() => {
+      playlistPollTimer = 0;
+      void pollPlaylistJob(jobId);
+    }, 1_500);
+  }
+
+  async function pollPlaylistJob(jobId) {
+    if (!playlistUi || playlistUi.jobId !== jobId) return;
+    try {
+      const response = await sendBridgeMessage({
+        type: "xdm-companion:playlist-status",
+        jobId,
+      });
+      if (!response || !response.ok) throw new Error(response?.message || "No se pudo consultar el progreso de la lista.");
+      const job = response.job;
+      renderPlaylistStatus(job);
+      if (job && !["awaiting_selection", "completed", "completed_with_issues", "failed"].includes(job.status)) {
+        schedulePlaylistPoll(jobId);
+      } else if (playlistUi && job.status !== "awaiting_selection") {
+        playlistUi.jobId = "";
+      }
+    } catch (error) {
+      if (!playlistUi || playlistUi.jobId !== jobId) return;
+      playlistUi.message.textContent = `${error.message || "No se pudo consultar el progreso."} La lista puede seguir procesándose en segundo plano.`;
+      playlistUi.trigger.disabled = false;
+      playlistUi.jobId = "";
+    }
+  }
+
+  async function startPlaylistPreview() {
+    const controls = playlistUi;
+    if (!controls || !controls.pageUrl) return;
+    if (playlistStatusTimer) clearTimeout(playlistStatusTimer);
+    playlistStatusTimer = 0;
+    if (playlistMenuTimer) clearTimeout(playlistMenuTimer);
+    playlistMenuTimer = 0;
+    controls.jobId = "";
+    controls.phase = "previewing";
+    controls.choices.setAttribute("hidden", "");
+    controls.widget.classList.add("open");
+    controls.trigger.setAttribute("aria-expanded", "true");
+    controls.message.textContent = "Detectando los videos disponibles en la lista…";
+    positionPlaylistMenu();
+    try {
+      const response = await sendBridgeMessage({
+        type: "xdm-companion:start-playlist",
+        pageUrl: controls.pageUrl,
+        title: document.title,
+      });
+      if (!response || !response.ok) throw new Error(response?.message || "No se pudo iniciar la lista.");
+      const job = response.job;
+      if (!job || typeof job.id !== "string") throw new Error("XDM Companion no devolvió el estado de la lista.");
+      controls.jobId = job.id;
+      renderPlaylistStatus(job);
+      if (!["awaiting_selection", "completed", "completed_with_issues", "failed"].includes(job.status)) {
+        schedulePlaylistPoll(job.id);
+      } else {
+        if (job.status !== "awaiting_selection") controls.jobId = "";
+      }
+    } catch (error) {
+      controls.phase = "failed";
+      controls.message.textContent = error.message || "No se pudo iniciar la lista.";
+      playlistStatusTimer = setTimeout(closePlaylistMenu, MENU_AUTO_CLOSE_MS);
+    }
+  }
+
+  async function queuePlaylistSelection(limit) {
+    const controls = playlistUi;
+    if (!controls || controls.phase !== "ready" || !controls.jobId) return;
+    if (playlistMenuTimer) clearTimeout(playlistMenuTimer);
+    playlistMenuTimer = 0;
+    controls.phase = "queueing";
+    controls.choices.setAttribute("hidden", "");
+    controls.message.textContent = limit === "all"
+      ? `Enviando los ${controls.downloadableCount} videos a XDM…`
+      : `Enviando los primeros ${Math.min(limit, controls.downloadableCount)} videos a XDM…`;
+    schedulePlaylistMenuAutoClose();
+    positionPlaylistMenu();
+    try {
+      const response = await sendBridgeMessage({
+        type: "xdm-companion:queue-playlist",
+        pageUrl: controls.pageUrl,
+        jobId: controls.jobId,
+        limit,
+      });
+      if (!response || !response.ok) throw new Error(response?.message || "No se pudo enviar la lista a XDM.");
+      const job = response.job;
+      if (!job || typeof job.id !== "string") throw new Error("XDM Companion no devolvió el estado de la lista.");
+      controls.jobId = job.id;
+      renderPlaylistStatus(job);
+      if (!["completed", "completed_with_issues", "failed"].includes(job.status)) {
+        schedulePlaylistPoll(job.id);
+      } else {
+        controls.jobId = "";
+      }
+    } catch (error) {
+      controls.phase = "ready";
+      controls.message.textContent = error.message || "No se pudo enviar la lista a XDM.";
+      renderPlaylistChoices(controls.downloadableCount);
+      controls.choices.removeAttribute("hidden");
+      schedulePlaylistMenuAutoClose();
+    }
   }
 
   function consumeEvent(event) {
@@ -518,6 +1020,10 @@
   }
 
   function showFor(video) {
+    if (isPlaylistListingPage(location.href)) {
+      hideVideoPicker();
+      return;
+    }
     const controls = createUi();
     if (!controls) return;
     const target = videoTargetFor(video);
@@ -810,5 +1316,6 @@
     window.addEventListener(eventName, handlePageEvent, { passive: true });
   }
 
+  syncPlaylistControl();
   observeRoot(document);
 })();
