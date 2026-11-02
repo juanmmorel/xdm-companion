@@ -87,12 +87,17 @@ async function requestFormats(message, sender) {
   }
   const adapterName = String(provider.browser?.adapter || "");
   const adapter = globalThis.XDM_SITE_ADAPTERS?.[adapterName];
-  // Reading the in-page player and querying browser cookies do not depend on
-  // one another. Start both immediately so prefetch spends less time waiting
-  // before it can ask the local companion for formats.
-  const playbackPromise = adapter
+  // A card preview is resolved from its canonical video URL and browser
+  // cookies. Do not read unrelated player state from the search/feed page.
+  // Normal playback pages still provide player metadata when available.
+  const previewContext = message.preview === true;
+  const playbackPromise = adapter && !previewContext
     ? adapter.readPlayback(sender.tab && sender.tab.id, pageUrl, provider)
-    : Promise.resolve({ playback: null, diagnostics: {} });
+    : Promise.resolve({
+        playback: null,
+        diagnostics: previewContext ? { preview_lookup_skipped: true } : {},
+      });
+  // Player metadata and scoped browser cookies are independent lookups.
   const cookiesPromise = browserCookies(pageUrl, provider);
   const [playbackResult, browserSession] = await Promise.all([
     playbackPromise,

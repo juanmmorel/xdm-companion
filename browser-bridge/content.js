@@ -10,6 +10,7 @@
   let activeVideo = null;
   let activePageUrl = location.href;
   let activeTitle = document.title;
+  let activeIsPreview = false;
   let hideTimer = 0;
   let menuAutoCloseTimer = 0;
   let ui = null;
@@ -124,7 +125,7 @@
 
   function videoTargetFor(video) {
     const provider = providerForUrl(location.href);
-    if (!provider) return { pageUrl: location.href, title: document.title };
+    if (!provider) return { pageUrl: location.href, title: document.title, isPreview: false };
 
     const preview = provider.browser?.preview || {};
     const cardSelectors = Array.isArray(preview.card_selectors) ? preview.card_selectors : [];
@@ -163,7 +164,42 @@
             if (title) break;
           }
         }
-        return { pageUrl, title: title.slice(0, 500) || document.title };
+        return { pageUrl, title: title.slice(0, 500) || document.title, isPreview: true };
+      }
+    }
+
+    if (card) {
+      const attributes = Array.isArray(preview.video_id_attributes)
+        ? preview.video_id_attributes : [];
+      const template = String(preview.video_url_template || "");
+      const player = provider.browser?.player || {};
+      const pattern = new RegExp(`^(?:${player.video_id_pattern || "[A-Za-z0-9_-]{11}"})$`);
+      const nodes = [card];
+      try { nodes.push(...card.querySelectorAll("*")); } catch (_) {}
+      if (template.includes("{video_id}")) {
+        for (const node of nodes) {
+          for (const attribute of attributes) {
+            const candidate = String(node.getAttribute?.(attribute) || "").trim();
+            if (!candidate || !pattern.test(candidate)) continue;
+            let pageUrl;
+            try {
+              pageUrl = new URL(
+                template.replace(/\{video_id\}/g, encodeURIComponent(candidate)),
+                location.href,
+              ).href;
+            } catch (_) { continue; }
+            if (!providerForUrl(pageUrl) || !hasVideoId(pageUrl, provider)) continue;
+
+            let title = "";
+            for (const selector of preview.title_selectors || []) {
+              try {
+                title = String(card.querySelector(selector)?.textContent || "").trim();
+              } catch (_) { title = ""; }
+              if (title) break;
+            }
+            return { pageUrl, title: title.slice(0, 500) || document.title, isPreview: true };
+          }
+        }
       }
     }
 
@@ -171,12 +207,16 @@
     // currently open watch URL. That could send the wrong video to XDM.
     if (card) return null;
     if (hasVideoId(location.href, provider)) {
-      return { pageUrl: location.href, title: document.title };
+      return { pageUrl: location.href, title: document.title, isPreview: false };
     }
     // A preview without a matching video link must not accidentally request
     // the search/feed URL as though it were an individual video.
     if (cardSelectors.length) return null;
-    return { pageUrl: location.href, title: document.title };
+    return { pageUrl: location.href, title: document.title, isPreview: false };
+  }
+
+  function formatCacheKey(pageUrl, isPreview) {
+    return `${isPreview ? "preview" : "page"}\u0000${pageUrl}`;
   }
 
   function hasUsableFormats(response) {
@@ -192,8 +232,11 @@
       recentFormatFailures.clear();
       return;
     }
-    cachedFormats.delete(pageUrl);
-    recentFormatFailures.delete(pageUrl);
+    for (const isPreview of [false, true]) {
+      const key = formatCacheKey(pageUrl, isPreview);
+      cachedFormats.delete(key);
+      recentFormatFailures.delete(key);
+    }
   }
 
   function remember(map, pageUrl, value) {
@@ -202,52 +245,55 @@
     while (map.size > FORMAT_CACHE_LIMIT) map.delete(map.keys().next().value);
   }
 
-  function requestFormats(pageUrl, title = document.title) {
+  function requestFormats(pageUrl, title = document.title, isPreview = false) {
+    const key = formatCacheKey(pageUrl, isPreview);
     const entry = { pageUrl, promise: null };
     entry.promise = sendBridgeMessage({
       type: "xdm-companion:get-formats",
       pageUrl,
       title,
+      preview: isPreview,
     }).then(response => {
       if (hasUsableFormats(response)) {
-        remember(cachedFormats, pageUrl, { response, expiresAt: Date.now() + FORMAT_CACHE_TTL_MS });
-        recentFormatFailures.delete(pageUrl);
+        remember(cachedFormats, key, { response, expiresAt: Date.now() + FORMAT_CACHE_TTL_MS });
+        recentFormatFailures.delete(key);
       } else {
-        cachedFormats.delete(pageUrl);
-        remember(recentFormatFailures, pageUrl, { response, failedAt: Date.now() });
+        cachedFormats.delete(key);
+        remember(recentFormatFailures, key, { response, failedAt: Date.now() });
       }
       return response;
     }).catch(error => {
-      cachedFormats.delete(pageUrl);
-      remember(recentFormatFailures, pageUrl, { error, failedAt: Date.now() });
+      cachedFormats.delete(key);
+      remember(recentFormatFailures, key, { error, failedAt: Date.now() });
       throw error;
     }).finally(() => {
-      if (pendingFormats.get(pageUrl) === entry) pendingFormats.delete(pageUrl);
+      if (pendingFormats.get(key) === entry) pendingFormats.delete(key);
     });
-    pendingFormats.set(pageUrl, entry);
+    pendingFormats.set(key, entry);
     return entry.promise;
   }
 
-  async function getFormats(pageUrl, { retryEmpty = false, title = document.title } = {}) {
+  async function getFormats(pageUrl, { retryEmpty = false, title = document.title, isPreview = false } = {}) {
+    const key = formatCacheKey(pageUrl, isPreview);
     const now = Date.now();
-    const cached = cachedFormats.get(pageUrl);
+    const cached = cachedFormats.get(key);
     if (cached && cached.expiresAt > now) {
       // Refresh insertion order so the small cache behaves as an LRU.
-      remember(cachedFormats, pageUrl, cached);
+      remember(cachedFormats, key, cached);
       return cached.response;
     }
-    if (cached) cachedFormats.delete(pageUrl);
+    if (cached) cachedFormats.delete(key);
 
-    const pending = pendingFormats.get(pageUrl);
+    const pending = pendingFormats.get(key);
     if (pending) {
       const response = await pending.promise;
       if (hasUsableFormats(response) || !retryEmpty) return response;
       // A click is an explicit request. If prefetch ran before player data was
       // ready, retry once now.
-      return requestFormats(pageUrl, title);
+      return requestFormats(pageUrl, title, isPreview);
     }
 
-    const failure = recentFormatFailures.get(pageUrl);
+    const failure = recentFormatFailures.get(key);
     if (
       !retryEmpty && failure
       && now - failure.failedAt < PREFETCH_RETRY_COOLDOWN_MS
@@ -255,18 +301,22 @@
       if (failure.error) throw failure.error;
       return failure.response;
     }
-    recentFormatFailures.delete(pageUrl);
-    return requestFormats(pageUrl, title);
+    recentFormatFailures.delete(key);
+    return requestFormats(pageUrl, title, isPreview);
   }
 
-  function prefetchFormats(pageUrl = activePageUrl || location.href, title = activeTitle || document.title) {
+  function prefetchFormats(
+    pageUrl = activePageUrl || location.href,
+    title = activeTitle || document.title,
+    isPreview = activeIsPreview,
+  ) {
     if (!pageUrl) return;
-    void getFormats(pageUrl, { title }).catch(() => {});
+    void getFormats(pageUrl, { title, isPreview }).catch(() => {});
   }
 
   function prefetchVideo(video) {
     const target = videoTargetFor(video);
-    if (target) prefetchFormats(target.pageUrl, target.title);
+    if (target) prefetchFormats(target.pageUrl, target.title, target.isPreview);
   }
 
   function syncPageContext() {
@@ -281,6 +331,7 @@
     const currentPageCanResolve = !provider || hasVideoId(pageUrl, provider);
     activePageUrl = activeTarget?.pageUrl || (liveVideo ? "" : currentPageCanResolve ? pageUrl : "");
     activeTitle = activeTarget?.title || (activePageUrl ? document.title : "");
+    activeIsPreview = Boolean(activeTarget?.isPreview);
 
     const menuWasOpen = Boolean(ui && ui.widget.classList.contains("open"));
     if (ui) {
@@ -297,7 +348,7 @@
       // Keep an already-open picker useful when the site changes videos.
       void loadFormats();
     } else if (activePageUrl) {
-      prefetchFormats(activePageUrl, activeTitle);
+      prefetchFormats(activePageUrl, activeTitle, activeIsPreview);
     }
     return true;
   }
@@ -473,7 +524,8 @@
     const targetUrl = target?.pageUrl || "";
     const targetTitle = target?.title || "";
     cancelHide();
-    if (activeVideo !== video || activePageUrl !== targetUrl) {
+    if (activeVideo !== video || activePageUrl !== targetUrl
+        || activeIsPreview !== Boolean(target?.isPreview)) {
       controls.widget.classList.remove("open");
       controls.trigger.setAttribute("aria-expanded", "false");
       controls.session = null;
@@ -486,9 +538,10 @@
     activeVideo = video;
     activePageUrl = targetUrl;
     activeTitle = targetTitle;
+    activeIsPreview = Boolean(target?.isPreview);
     // Begin while the user is hovering the video, before opening the picker.
     // Playback events also warm the cache when the pointer is elsewhere.
-    prefetchFormats(targetUrl, targetTitle);
+    prefetchFormats(targetUrl, targetTitle, activeIsPreview);
     controls.widget.removeAttribute("hidden");
     controls.widget.classList.add("visible");
     positionUi();
@@ -548,6 +601,7 @@
     if (!ui || !activeVideo) return;
     const pageUrl = activePageUrl;
     const pageTitle = activeTitle || document.title;
+    const isPreview = activeIsPreview;
     if (!pageUrl) {
       openMenu();
       ui.status.textContent = "No se pudo identificar el enlace de esta vista previa. Abre el video y vuelve a intentarlo.";
@@ -562,8 +616,8 @@
     cancelMenuAutoClose();
     openMenu();
     try {
-      const response = await getFormats(pageUrl, { retryEmpty: true, title: pageTitle });
-      if (generation !== pageGeneration || pageUrl !== activePageUrl) return;
+      const response = await getFormats(pageUrl, { retryEmpty: true, title: pageTitle, isPreview });
+      if (generation !== pageGeneration || pageUrl !== activePageUrl || isPreview !== activeIsPreview) return;
       if (!response || !response.ok) throw new Error(response && response.message || "No se pudieron obtener las resoluciones.");
       const formats = Array.isArray(response.formats) ? response.formats : [];
       if (!formats.length) {
@@ -580,10 +634,10 @@
       ui.status.textContent = statusParts.join(" · ");
       for (const format of formats) addFormatChoice(format);
     } catch (error) {
-      if (generation !== pageGeneration || pageUrl !== activePageUrl) return;
+      if (generation !== pageGeneration || pageUrl !== activePageUrl || isPreview !== activeIsPreview) return;
       ui.status.textContent = error.message || "XDM Companion no está disponible.";
     } finally {
-      if (generation === pageGeneration && pageUrl === activePageUrl) {
+      if (generation === pageGeneration && pageUrl === activePageUrl && isPreview === activeIsPreview) {
         ui.trigger.disabled = false;
         positionUi();
         scheduleMenuAutoClose();
@@ -722,8 +776,9 @@
     if (changed || !pageDataEventsFor(location.href).includes(event.type)) return;
 
     const pageUrl = location.href;
-    const cached = cachedFormats.get(pageUrl);
-    if ((cached && cached.expiresAt > Date.now()) || pendingFormats.has(pageUrl)
+    const cacheKey = formatCacheKey(pageUrl, false);
+    const cached = cachedFormats.get(cacheKey);
+    if ((cached && cached.expiresAt > Date.now()) || pendingFormats.has(cacheKey)
         || playerDataRetries.has(pageUrl)) return;
     const provider = providerForUrl(pageUrl);
     if (provider && !hasVideoId(pageUrl, provider)) return;
@@ -731,8 +786,8 @@
     // Some sites publish player data just after navigation. Retry an early
     // empty/failing prefetch once, without creating a request storm.
     playerDataRetries.add(pageUrl);
-    recentFormatFailures.delete(pageUrl);
-    prefetchFormats(pageUrl);
+    recentFormatFailures.delete(cacheKey);
+    prefetchFormats(pageUrl, document.title, false);
   }
 
   function pageDataEventsFor(rawUrl) {

@@ -50,20 +50,26 @@
         "preview": {
           "card_selectors": [
             "ytd-rich-item-renderer",
+            "ytd-rich-grid-media",
             "ytd-video-renderer",
             "ytd-grid-video-renderer",
             "ytd-compact-video-renderer",
             "ytd-playlist-video-renderer",
-            "ytd-reel-item-renderer"
+            "ytd-reel-item-renderer",
+            "ytd-thumbnail",
+            "ytd-video-preview"
           ],
           "link_selectors": [
             "a#thumbnail[href]",
             "a#video-title[href]",
             "a#video-title-link[href]",
+            "a[href*='/watch?']",
             "a[href*='/shorts/']",
             "a[href*='/live/']"
           ],
-          "title_selectors": ["a#video-title", "a#video-title-link"]
+          "title_selectors": ["a#video-title", "a#video-title-link"],
+          "video_id_attributes": ["video-id", "data-video-id"],
+          "video_url_template": "https://www.youtube.com/watch?v={video_id}"
         }
       },
       "backend": {

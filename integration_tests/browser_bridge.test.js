@@ -124,7 +124,7 @@ class FakeElement {
       for (const child of node.children || []) {
         if (!(child instanceof FakeElement)) continue;
         if (selector === "button" && child.tagName === "BUTTON") matches.push(child);
-        if (selector === "video, *") matches.push(child);
+        if (selector === "video, *" || selector === "*") matches.push(child);
         visit(child);
       }
     };
@@ -402,11 +402,171 @@ test("a thumbnail preview requests formats for that card's video URL", async () 
   await tick();
   assert.equal(messages[0].pageUrl, link.href);
   assert.equal(messages[0].title, "Preview video title");
+  assert.equal(messages[0].preview, true);
 
   const shadow = document.documentElement.children.find(element => element.shadowRoot).shadowRoot;
   shadow.getElementById("trigger").dispatch("click");
   await tick();
   assert.equal(shadow.getElementById("choices").children[0].children[0].textContent, "1080p");
+});
+
+test("YouTube thumbnail-container previews resolve their canonical watch link", async () => {
+  const messages = [];
+  const video = new FakeVideo();
+  const card = new FakeElement("ytd-thumbnail");
+  const link = new FakeElement("a");
+  link.href = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+  card.matches = selector => selector === "ytd-thumbnail";
+  card.querySelectorAll = selector => selector === "a#thumbnail[href]" ? [link] : [];
+  card.append(video, link);
+  loadContentScript({
+    pageUrl: "https://www.youtube.com/feed/subscriptions",
+    videos: [card],
+    onMessage: async message => {
+      messages.push(message);
+      return { ok: true, session: "n".repeat(32), formats: [{ format_id: "1080", height: 1080 }] };
+    },
+  });
+
+  video.dispatch("pointerenter");
+  await tick();
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].pageUrl, link.href);
+  assert.equal(messages[0].preview, true);
+});
+
+test("a thumbnail preview can build the canonical video URL from configured card metadata", async () => {
+  const messages = [];
+  const video = new FakeVideo();
+  const card = new FakeElement("ytd-rich-item-renderer");
+  card.setAttribute("video-id", "dQw4w9WgXcQ");
+  card.matches = selector => selector === "ytd-rich-item-renderer";
+  card.querySelectorAll = () => [];
+  card.append(video);
+  loadContentScript({
+    pageUrl: "https://www.youtube.com/results?search_query=preview",
+    videos: [card],
+    onMessage: async message => {
+      messages.push(message);
+      return { ok: true, session: "i".repeat(32), formats: [{ format_id: "720", height: 720 }] };
+    },
+  });
+
+  video.dispatch("pointerenter");
+  await tick();
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].pageUrl, "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+  assert.equal(messages[0].preview, true);
+});
+
+test("preview and watch-page format lookups keep separate caches for the same video URL", async () => {
+  const messages = [];
+  const previewVideo = new FakeVideo();
+  const card = new FakeElement("ytd-video-renderer");
+  const link = new FakeElement("a");
+  link.href = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+  card.matches = selector => selector === "ytd-video-renderer";
+  card.querySelectorAll = selector => selector.startsWith("a#") ? [link] : [];
+  card.append(previewVideo);
+  const watchVideo = new FakeVideo();
+  const { location } = loadContentScript({
+    pageUrl: "https://www.youtube.com/results?search_query=preview",
+    videos: [card, watchVideo],
+    onMessage: async message => {
+      messages.push(message);
+      return { ok: true, session: "m".repeat(32), formats: [{ format_id: "1080", height: 1080 }] };
+    },
+  });
+
+  previewVideo.dispatch("pointerenter");
+  await tick();
+  location.href = link.href;
+  watchVideo.dispatch("pointerenter");
+  await tick();
+
+  assert.equal(messages.length, 2);
+  assert.equal(messages[0].pageUrl, link.href);
+  assert.equal(messages[0].preview, true);
+  assert.equal(messages[1].pageUrl, link.href);
+  assert.equal(messages[1].preview, false);
+});
+
+test("an unidentified preview never requests the feed URL", async () => {
+  const messages = [];
+  const video = new FakeVideo();
+  const card = new FakeElement("ytd-video-renderer");
+  card.setAttribute("video-id", "invalid-id");
+  card.matches = selector => selector === "ytd-video-renderer";
+  card.querySelectorAll = () => [];
+  card.append(video);
+  const { document } = loadContentScript({
+    pageUrl: "https://www.youtube.com/results?search_query=preview",
+    videos: [card],
+    onMessage: async message => {
+      messages.push(message);
+      return { ok: true, session: "j".repeat(32), formats: [] };
+    },
+  });
+
+  video.dispatch("pointerenter");
+  await tick();
+  assert.equal(messages.length, 0);
+  const shadow = document.documentElement.children.find(element => element.shadowRoot).shadowRoot;
+  shadow.getElementById("trigger").dispatch("click");
+  await tick();
+  assert.equal(messages.length, 0);
+  assert.match(shadow.getElementById("status").textContent, /No se pudo identificar/);
+});
+
+test("preview format requests use the canonical URL and cookies without reading unrelated player state", async () => {
+  let messageListener;
+  let playerReadCount = 0;
+  let cookieQueryCount = 0;
+  const payloads = [];
+  const context = {
+    URL,
+    navigator: { languages: ["es-DO", "es"], language: "es-DO", userAgent: "test-agent" },
+    chrome: {
+      runtime: { onMessage: { addListener(listener) { messageListener = listener; } } },
+      cookies: { async getAll() { cookieQueryCount += 1; return []; } },
+      scripting: {
+        async executeScript() {
+          playerReadCount += 1;
+          return [{ result: {
+            playback: { audio_track: { name: "Original" } },
+            diagnostics: { video_id_matches: true },
+          } }];
+        },
+      },
+    },
+    fetch: async (_url, options) => {
+      payloads.push(JSON.parse(options.body));
+      return { ok: true, json: async () => ({ session: "k".repeat(32), formats: [] }) };
+    },
+  };
+  loadBackground(context);
+
+  const request = (preview, pageUrl) => new Promise(resolve => {
+    const keepAlive = messageListener({
+      type: "xdm-companion:get-formats",
+      pageUrl,
+      title: "Preview title",
+      preview,
+    }, { tab: { id: 4, url: "https://www.youtube.com/results?search_query=preview", title: "Feed" } }, resolve);
+    assert.equal(keepAlive, true);
+  });
+
+  const canonicalUrl = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+  await request(true, canonicalUrl);
+  assert.equal(playerReadCount, 0);
+  assert.ok(cookieQueryCount > 0, "cookies remain available to the extractor for preview requests");
+  assert.equal(payloads[0].url, canonicalUrl);
+  assert.equal(payloads[0].title, "Preview title");
+  assert.equal(payloads[0].youtube_player_diagnostics.preview_lookup_skipped, true);
+
+  await request(false, canonicalUrl);
+  assert.equal(playerReadCount, 1, "normal playback pages still contribute matching player metadata");
+  assert.equal(payloads[1].youtube_playback.audio_track.name, "Original");
 });
 
 test("the missing background receiver is shown as a clear extension reload instruction", async () => {
