@@ -21,14 +21,19 @@ def _safe_audio_track(value):
   if not language and raw_id:
     language = _normalize_language(raw_id.split(".", 1)[0])
   name = str(value.get("name") or "").strip()[:100]
-  if not language and not raw_id and not name:
+  is_original = value.get("is_original") is True
+  inferred = value.get("inferred") is True
+  if not language and not raw_id and not name and not is_original and not inferred:
     return None
-  return {
+  track = {
       "language": language,
       "id": raw_id,
       "name": name,
-      "is_original": value.get("is_original") is True,
+      "is_original": is_original,
   }
+  if inferred:
+    track["inferred"] = True
+  return track
 
 def _safe_accept_language(value):
   if not isinstance(value, str):

@@ -1,5 +1,7 @@
 "use strict";
 
+const EXTENSION_API = globalThis.browser || globalThis.chrome;
+
 if (typeof importScripts === "function") {
   if (!globalThis.XDM_SITE_CATALOG) importScripts("./site-config.js");
   for (const provider of globalThis.XDM_SITE_CATALOG?.providers || []) {
@@ -44,7 +46,7 @@ async function browserCookies(pageUrl, provider) {
   // while still allowing the others. Keep every successful cookie batch.
   const results = await Promise.all(queries.map(async ({ kind, query }) => {
     try {
-      const cookies = await chrome.cookies.getAll(query);
+      const cookies = await EXTENSION_API.cookies.getAll(query);
       return { kind, cookies, error: "" };
     } catch (error) {
       return {
@@ -144,7 +146,7 @@ async function sendToCompanion(path, payload) {
   }
 }
 
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+EXTENSION_API.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || !["xdm-companion:get-formats", "xdm-companion:select-format"].includes(message.type)) {
     return false;
   }

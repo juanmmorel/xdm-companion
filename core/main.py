@@ -448,6 +448,8 @@ def _media_from_format(
       # original audio language so the local relay removes alternate tracks.
       "source_manifest_url": selected.get("_xdm_companion_source_manifest_url"),
       "audio_language": _normalize_language((audio_preferences or {}).get("language")),
+      "audio_track_id": str((audio_preferences or {}).get("id") or "").strip()[:128],
+      "audio_track_name": str((audio_preferences or {}).get("name") or "").strip()[:100],
   }
 
 
@@ -539,6 +541,31 @@ def _format_choice_score(video_format, preferred_languages=()):
   )
 
 
+def _has_audio_track_metadata(info):
+  """Whether any audio rendition carries labels that could distinguish tracks."""
+  for video_format in (info or {}).get("formats") or []:
+    if not isinstance(video_format, dict):
+      continue
+    if str(video_format.get("acodec") or "").lower() in {"", "none"}:
+      continue
+    track = video_format.get("audio_track")
+    track = track if isinstance(track, dict) else {}
+    if (
+        _normalize_language(video_format.get("language"))
+        or str(video_format.get("audio_track_id") or "").strip()
+        or str(video_format.get("audio_track_name") or track.get("name")
+               or track.get("displayName") or "").strip()
+        or video_format.get("audio_track_is_default") is False
+    ):
+      return True
+    try:
+      if float(video_format.get("language_preference") or 0) <= -10:
+        return True
+    except (TypeError, ValueError):
+      pass
+  return False
+
+
 def _format_size(value):
   try:
     size = int(value)
@@ -624,6 +651,16 @@ def _available_formats(info, page_url, cookies, user_agent, audio_track=None, ac
       if not adapter.accepts_format(
           video_format, audio_preferences, original_audio_language,
           is_dash_manifest, has_audio, is_original_audio,
+          audio_absence_confirmed=info.get("_xdm_companion_audio_absence_confirmed") is True,
+          audio_streams_present_confirmed=(
+              info.get("_xdm_companion_audio_streams_present") is True
+          ),
+          allow_unlabelled_muxed=(
+              info.get("_xdm_companion_audio_streams_present") is True
+              and not audio_preferences
+              and not original_audio_language
+              and not _has_audio_track_metadata(info)
+          ),
       ):
         continue
     elif not has_audio and not is_dash_manifest:
@@ -648,6 +685,15 @@ def _available_formats(info, page_url, cookies, user_agent, audio_track=None, ac
     media = _media_from_format(
         media_format, page_url, cookies, user_agent, title, audio_preferences, accept_language,
     )
+    audio_absence_confirmed = info.get("_xdm_companion_audio_absence_confirmed") is True
+    if audio_absence_confirmed:
+      media["audio_absence_confirmed"] = True
+    if info.get("_xdm_companion_audio_streams_present") is True:
+      media["audio_streams_present_confirmed"] = True
+    if audio_preferences and audio_preferences.get("is_original") is True:
+      media["audio_track_is_original"] = True
+      if audio_preferences.get("inferred") is True:
+        media["audio_track_inferred"] = True
     format_path = urlparse(str(video_format.get("url") or "")).path.lower()
     format_manifest = _manifest_source(video_format)
     format_is_manifest = format_path.endswith(".mpd") or bool(
@@ -662,8 +708,11 @@ def _available_formats(info, page_url, cookies, user_agent, audio_track=None, ac
         "filesize": _format_size(filesize),
         "label": (
             f"{height}p (sin audio)"
-            if str(video_format.get("acodec") or "").lower() in {"", "none"}
-            and not (format_is_manifest or format_manifest)
+          if audio_absence_confirmed
+          or (
+              str(video_format.get("acodec") or "").lower() in {"", "none"}
+              and not (format_is_manifest or format_manifest)
+          )
             else f"{height}p"
         ),
     }

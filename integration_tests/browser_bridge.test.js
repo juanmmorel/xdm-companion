@@ -140,6 +140,8 @@ class FakeElement {
     }
     return null;
   }
+  getAttribute(name) { return this.attributes.has(name) ? this.attributes.get(name) : null; }
+  querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
 }
 
 class FakeVideo extends FakeElement {
@@ -168,7 +170,12 @@ class FakeDocument {
   }
 }
 
-function loadContentScript({ onMessage = async () => ({ ok: true }), videos = [] } = {}) {
+function loadContentScript({
+  onMessage = async () => ({ ok: true }),
+  videos = [],
+  api = "chrome",
+  pageUrl = "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+} = {}) {
   const observers = [];
   const timers = new Map();
   const windowListeners = new Map();
@@ -181,7 +188,7 @@ function loadContentScript({ onMessage = async () => ({ ok: true }), videos = []
     observe() {}
   }
   const document = new FakeDocument();
-  const location = { href: "https://www.youtube.com/watch?v=example" };
+  const location = { href: pageUrl };
   const browserWindow = {
     innerWidth: 1280,
     innerHeight: 800,
@@ -210,14 +217,14 @@ function loadContentScript({ onMessage = async () => ({ ok: true }), videos = []
     },
     clearTimeout: timerId => timers.delete(timerId),
     window: browserWindow,
-    chrome: {
-      runtime: {
-        sendMessage: onMessage,
-        getURL: resource => `chrome-extension://test-extension/${resource}`,
-      },
-    },
     XDM_SITE_CATALOG: siteCatalog,
   };
+  const runtime = {
+    sendMessage: onMessage,
+    getURL: resource => `extension://test-extension/${resource}`,
+  };
+  if (api === "chrome") context.chrome = { runtime };
+  if (api === "browser") context.browser = { runtime };
   vm.runInNewContext(fs.readFileSync(path.join(bridgeDir, "content.js"), "utf8"), context);
   return {
     document,
@@ -275,7 +282,7 @@ test("the floating XDM button loads choices and sends the selected resolution", 
   assert.ok(trigger);
   assert.equal(
     trigger.children[0].src,
-    "chrome-extension://test-extension/icons/xdm-download-button.png",
+    "extension://test-extension/icons/xdm-download-button.png",
   );
   assert.equal(messages.length, 1, "prefetching formats does not start a download");
 
@@ -300,6 +307,127 @@ test("the floating XDM button loads choices and sends the selected resolution", 
   assert.equal(messages[1].formatId, "720");
   assert.equal(messages[1].session, "a".repeat(32));
   assert.match(shadow.getElementById("status").textContent, /enviado a XDM/);
+});
+
+test("the floating button uses the browser Promise API when Chrome namespace is absent", async () => {
+  const video = new FakeVideo();
+  const { document } = loadContentScript({
+    api: "browser",
+    videos: [video],
+    onMessage: async message => message.type === "xdm-companion:get-formats"
+      ? {
+          ok: true,
+          session: "b".repeat(32),
+          formats: [{ format_id: "1440", height: 1440, label: "1440p" }],
+        }
+      : { ok: true },
+  });
+
+  video.dispatch("pointerenter");
+  const shadow = document.documentElement.children.find(element => element.shadowRoot).shadowRoot;
+  shadow.getElementById("trigger").dispatch("click");
+  await tick();
+
+  assert.equal(shadow.getElementById("choices").children.length, 1);
+  assert.equal(shadow.getElementById("choices").children[0].children[0].textContent, "1440p");
+});
+
+test("the floating button supports callback-based Chrome messaging", async () => {
+  const messages = [];
+  const video = new FakeVideo();
+  const { document } = loadContentScript({
+    videos: [video],
+    onMessage(message, callback) {
+      messages.push(message);
+      callback({
+        ok: true,
+        session: "c".repeat(32),
+        formats: [{ format_id: "1080", height: 1080, label: "1080p" }],
+      });
+    },
+  });
+
+  video.dispatch("pointerenter");
+  const shadow = document.documentElement.children.find(element => element.shadowRoot).shadowRoot;
+  shadow.getElementById("trigger").dispatch("click");
+  await tick();
+
+  assert.equal(messages.length, 1);
+  assert.equal(shadow.getElementById("choices").children.length, 1);
+  assert.equal(shadow.getElementById("status").textContent, "Elige una resolución:");
+});
+
+test("a missing extension runtime shows a reload hint instead of a sendMessage TypeError", async () => {
+  const video = new FakeVideo();
+  const { document } = loadContentScript({ api: "none", videos: [video] });
+
+  video.dispatch("pointerenter");
+  const shadow = document.documentElement.children.find(element => element.shadowRoot).shadowRoot;
+  const trigger = shadow.getElementById("trigger");
+  assert.equal(trigger.children[0].textContent, "XDM", "the button keeps a visible fallback mark");
+  trigger.dispatch("click");
+  await tick();
+
+  const status = shadow.getElementById("status").textContent;
+  assert.match(status, /Recarga esta página/);
+  assert.doesNotMatch(status, /Cannot read properties of undefined/);
+});
+
+test("a thumbnail preview requests formats for that card's video URL", async () => {
+  const messages = [];
+  const video = new FakeVideo();
+  const card = new FakeElement("ytd-video-renderer");
+  const link = new FakeElement("a");
+  link.href = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+  link.setAttribute("title", "Preview video title");
+  card.matches = selector => selector === "ytd-video-renderer";
+  card.querySelectorAll = selector => selector.startsWith("a#") ? [link] : [];
+  card.append(video, link);
+  const { document } = loadContentScript({
+    pageUrl: "https://www.youtube.com/results?search_query=preview",
+    videos: [card],
+    onMessage: async message => {
+      messages.push(message);
+      return message.type === "xdm-companion:get-formats"
+        ? {
+            ok: true,
+            session: "p".repeat(32),
+            formats: [{ format_id: "preview-1080", height: 1080, label: "1080p" }],
+          }
+        : { ok: true };
+    },
+  });
+
+  video.dispatch("pointerenter");
+  await tick();
+  assert.equal(messages[0].pageUrl, link.href);
+  assert.equal(messages[0].title, "Preview video title");
+
+  const shadow = document.documentElement.children.find(element => element.shadowRoot).shadowRoot;
+  shadow.getElementById("trigger").dispatch("click");
+  await tick();
+  assert.equal(shadow.getElementById("choices").children[0].children[0].textContent, "1080p");
+});
+
+test("the missing background receiver is shown as a clear extension reload instruction", async () => {
+  const video = new FakeVideo();
+  const { document } = loadContentScript({
+    api: "browser",
+    videos: [video],
+    onMessage: async () => {
+      throw new Error("Could not establish connection. Receiving end does not exist.");
+    },
+  });
+
+  video.dispatch("pointerenter");
+  const shadow = document.documentElement.children.find(element => element.shadowRoot).shadowRoot;
+  shadow.getElementById("trigger").dispatch("click");
+  await tick();
+
+  const status = shadow.getElementById("status").textContent;
+  assert.match(status, /La extensión XDM Companion no respondió/);
+  assert.match(status, /Recarga la extensión/);
+  assert.doesNotMatch(status, /Receiving end does not exist/);
 });
 
 test("the format menu closes after five seconds without a selection", async () => {
@@ -350,7 +478,7 @@ test("changing videos preloads the new URL before the floating button is clicked
   await tick();
   assert.equal(requests.length, 1, "playback preloads the first URL");
 
-  location.href = "https://www.youtube.com/watch?v=next-video";
+  location.href = "https://www.youtube.com/watch?v=a1b2c3d4e5F";
   dispatchWindowEvent("yt-navigate-finish");
   await tick();
   assert.equal(requests.length, 2, "navigation starts preloading before the user opens the picker");
@@ -393,7 +521,7 @@ test("a late response from the previous video cannot replace an open new-video p
   await tick();
   assert.equal(requests.length, 1, "the first video has a single shared prefetch request");
 
-  location.href = "https://www.youtube.com/watch?v=next-video";
+  location.href = "https://www.youtube.com/watch?v=a1b2c3d4e5F";
   dispatchWindowEvent("yt-navigate-finish");
   await tick();
   assert.equal(requests.length, 2, "navigation starts fetching the new video without another click");
@@ -640,9 +768,12 @@ test("background finds the original audio track from YouTube's default track ind
   });
   assert.equal(formatPayload.youtube_player_diagnostics.player_found, true);
   assert.equal(formatPayload.youtube_player_diagnostics.video_formats, 55);
+  assert.equal(formatPayload.youtube_player_diagnostics.audio_formats, 1);
+  assert.equal(formatPayload.youtube_player_diagnostics.audio_streams_present, true);
   assert.equal(formatPayload.youtube_player_diagnostics.direct_video_formats, 54);
   assert.equal(formatPayload.youtube_player_diagnostics.encrypted_video_formats, 0);
   assert.equal(formatPayload.youtube_playback.video_id, "dQw4w9WgXcQ");
+  assert.equal(formatPayload.youtube_playback.audio_streams_present, true);
   assert.equal(formatPayload.youtube_playback.formats[0].height, 360);
   assert.match(formatPayload.youtube_playback.formats[0].url, /googlevideo\.com/);
   assert.equal(formatPayload.youtube_playback.source_heights[0], 4320);
@@ -662,6 +793,93 @@ test("background finds the original audio track from YouTube's default track ind
     session: "b".repeat(32),
     format_id: "720",
   });
+});
+
+test("the YouTube adapter reports an explicit no-audio player response", async () => {
+  const player = {
+    getPlayerResponse: () => ({
+      videoDetails: { videoId: "dQw4w9WgXcQ", title: "Silent video" },
+      streamingData: {
+        adaptiveFormats: [{
+          itag: 137,
+          url: "https://rr1---sn.googlevideo.com/videoplayback?itag=137",
+          mimeType: 'video/mp4; codecs="avc1.640028"',
+          height: 1080,
+          width: 1920,
+        }],
+      },
+    }),
+  };
+  const context = {
+    URL,
+    console: { warn: () => {} },
+    document: { querySelector: () => player },
+    window: { ytInitialPlayerResponse: null },
+    chrome: {
+      scripting: {
+        executeScript: async options => [{ result: options.func(...options.args) }],
+      },
+    },
+  };
+  vm.runInNewContext(
+    fs.readFileSync(path.join(bridgeDir, "providers/youtube.js"), "utf8"),
+    context,
+  );
+  const youtubeProvider = siteCatalog.providers.find(provider => provider.id === "youtube");
+  const result = await context.XDM_SITE_ADAPTERS.youtube.readPlayback(
+    42,
+    "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    youtubeProvider,
+  );
+
+  assert.equal(result.playback.audio_streams_present, false);
+  assert.equal(result.diagnostics.audio_formats, 0);
+  assert.equal(result.playback.formats[0].height, 1080);
+});
+
+test("the YouTube adapter identifies one unlabelled music track as the unique original", async () => {
+  const player = {
+    getAvailableAudioTracks: () => [{}],
+    getPlayerResponse: () => ({
+      videoDetails: { videoId: "dQw4w9WgXcQ", title: "Instrumental video" },
+      streamingData: {
+        formats: [{
+          itag: 18,
+          url: "https://rr1---sn.googlevideo.com/videoplayback?itag=18",
+          mimeType: 'video/mp4; codecs="avc1.42001E, mp4a.40.2"',
+          height: 360,
+          audioTrack: {},
+        }],
+      },
+    }),
+  };
+  const context = {
+    URL,
+    console: { warn: () => {} },
+    document: { querySelector: () => player },
+    window: { ytInitialPlayerResponse: null },
+    chrome: {
+      scripting: {
+        executeScript: async options => [{ result: options.func(...options.args) }],
+      },
+    },
+  };
+  vm.runInNewContext(
+    fs.readFileSync(path.join(bridgeDir, "providers/youtube.js"), "utf8"),
+    context,
+  );
+  const youtubeProvider = siteCatalog.providers.find(provider => provider.id === "youtube");
+  const result = await context.XDM_SITE_ADAPTERS.youtube.readPlayback(
+    42,
+    "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    youtubeProvider,
+  );
+
+  assert.equal(result.playback.audio_streams_present, true);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(result.playback.audio_track)),
+    { language: "", name: "", id: "", is_original: true, inferred: true },
+  );
 });
 
 test("background gathers YouTube account cookies for a youtu.be video", async () => {
@@ -708,7 +926,7 @@ test("background gathers YouTube account cookies for a youtu.be video", async ()
   assert.deepEqual(sentPayload.cookies.map(cookie => cookie.name).sort(), ["LOGIN_INFO", "SAPISID"]);
 });
 
-test("background reads player data and browser cookies concurrently", async () => {
+test("background reads player data and browser cookies through the browser namespace", async () => {
   let onMessage;
   let resolvePlayer;
   let playerReadStarted = false;
@@ -720,7 +938,7 @@ test("background reads player data and browser cookies concurrently", async () =
     document: { querySelector: () => null, getElementById: () => null },
     window: {},
     console: { warn: () => {} },
-    chrome: {
+    browser: {
       cookies: {
         getAll: async () => {
           cookieReads++;
@@ -745,8 +963,8 @@ test("background reads player data and browser cookies concurrently", async () =
   };
   loadBackground(context);
   const responsePromise = new Promise(resolve => onMessage(
-    { type: "xdm-companion:get-formats", pageUrl: "https://www.youtube.com/watch?v=example" },
-    { tab: { id: 7, url: "https://www.youtube.com/watch?v=example" } },
+    { type: "xdm-companion:get-formats", pageUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" },
+    { tab: { id: 7, url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" } },
     resolve,
   ));
 

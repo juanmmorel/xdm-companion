@@ -77,6 +77,7 @@ def test_youtube_format_diagnostics_classify_streams_without_exposing_urls():
   assert summary["formats"] == 4
   assert summary["video"] == 3
   assert summary["audio_only"] == 1
+  assert summary["audio_streams"] == 2
   assert summary["video_with_url"] == 3
   assert summary["video_with_audio"] == 1
   assert summary["video_only_with_manifest"] == 1
@@ -118,6 +119,54 @@ def test_single_unambiguous_youtube_audio_track_allows_muxed_formats():
       "inferred": True,
   }
   assert [option["height"] for option, _media in options] == [1080]
+
+
+def test_unique_music_track_without_language_is_kept_as_original_audio():
+  page_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+  info = {"formats": [
+      {
+          "format_id": "audio-music-low",
+          "url": "https://rr1---sn.googlevideo.com/audio/low",
+          "vcodec": "none",
+          "acodec": "opus",
+          "audio_track_id": "instrumental-track",
+      },
+      {
+          "format_id": "audio-music-high",
+          "url": "https://rr1---sn.googlevideo.com/audio/high",
+          "vcodec": "none",
+          "acodec": "mp4a",
+          "audio_track_id": "instrumental-track",
+      },
+      {
+          "format_id": "muxed-1080",
+          "url": "https://rr1---sn.googlevideo.com/video/muxed",
+          "height": 1080,
+          "vcodec": "avc1",
+          "acodec": "mp4a",
+          "audio_track_id": "instrumental-track",
+      },
+  ]}
+
+  original = youtube_provider._youtube_original_audio_track(info)
+  options = main._available_formats(info, page_url, [], "Test browser")
+
+  assert original == {
+      "language": "", "id": "instrumental-track", "name": "",
+      "is_original": True, "inferred": True,
+  }
+  assert [option["height"] for option, _media in options] == [1080]
+
+
+def test_multiple_unlabelled_audio_variants_without_track_identity_are_not_guessed():
+  info = {"formats": [
+      {"format_id": "audio-a", "url": "https://rr1---sn.googlevideo.com/a",
+       "vcodec": "none", "acodec": "opus"},
+      {"format_id": "audio-b", "url": "https://rr1---sn.googlevideo.com/b",
+       "vcodec": "none", "acodec": "mp4a"},
+  ]}
+
+  assert youtube_provider._youtube_original_audio_track(info) is None
 
 
 def test_youtube_does_not_infer_original_audio_when_multiple_languages_are_present():
@@ -230,6 +279,50 @@ def test_browser_youtube_player_formats_are_validated_and_drm_is_filtered():
   drm_info = youtube_provider._safe_youtube_playback(playback, page_url)
   assert drm_info is not None
   assert main._available_formats(drm_info, page_url, [], "Test browser") == []
+
+
+def test_browser_playback_preserves_explicit_evidence_that_the_player_has_no_audio():
+  page_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+  playback = {
+      "video_id": "dQw4w9WgXcQ",
+      "audio_streams_present": False,
+      "source_heights": [1080],
+      "formats": [{
+          "itag": 137,
+          "url": "https://rr1---sn.googlevideo.com/videoplayback?itag=137",
+          "mime_type": 'video/mp4; codecs="avc1.640028"',
+          "height": 1080,
+      }],
+  }
+
+  info = youtube_provider._safe_youtube_playback(playback, page_url)
+
+  assert info["_xdm_companion_player_audio_streams_present"] is False
+  assert info["formats"][0]["acodec"] == "none"
+
+
+def test_silent_video_classification_requires_both_player_and_extractor_evidence():
+  browser_info = {
+      "_xdm_companion_player_audio_streams_present": False,
+      "_xdm_companion_source_heights": [1080],
+      "formats": [{"has_drm": False}],
+  }
+  extractor_info = {
+      "formats": [{"vcodec": "avc1", "acodec": "none"}],
+      "_xdm_companion_diagnostics": {"flags": []},
+  }
+  summary = {"formats": 1, "video": 1, "audio_streams": 0}
+
+  assert youtube_provider._youtube_silent_video_confirmed(
+      browser_info, extractor_info, summary,
+  ) is True
+  assert youtube_provider._youtube_silent_video_confirmed(
+      browser_info, extractor_info, {**summary, "audio_streams": 1},
+  ) is False
+  assert youtube_provider._youtube_silent_video_confirmed(
+      browser_info, extractor_info, summary,
+      {"language": "en", "is_original": True},
+  ) is False
 
 
 def test_browser_player_selects_youtube_original_audio_not_the_current_dub():
