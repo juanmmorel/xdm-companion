@@ -8,6 +8,8 @@
   const FORMAT_CACHE_LIMIT = 4;
   const MENU_AUTO_CLOSE_MS = 5 * 1000;
   let activeVideo = null;
+  let activePageUrl = location.href;
+  let activeTitle = document.title;
   let hideTimer = 0;
   let menuAutoCloseTimer = 0;
   let ui = null;
@@ -18,14 +20,163 @@
   let observedPageUrl = location.href;
   let pageGeneration = 0;
 
-  function sendBridgeMessage(message) {
-    try {
-      const response = chrome.runtime.sendMessage(message);
-      if (response && typeof response.then === "function") return response;
-      return Promise.reject(new Error("El navegador no pudo contactar el puente de XDM."));
-    } catch (error) {
-      return Promise.reject(error);
+  function extensionRuntime() {
+    return globalThis.browser?.runtime || globalThis.chrome?.runtime || null;
+  }
+
+  function extensionMessageError(error) {
+    const detail = String(error && error.message || "");
+    if (!detail || /context invalidated|receiving end does not exist|message port closed/i.test(detail)) {
+      return new Error(
+        "La extensión XDM Companion no respondió. Recarga la extensión en el navegador y después recarga esta página.",
+      );
     }
+    return error instanceof Error ? error : new Error(detail);
+  }
+
+  function sendBridgeMessage(message) {
+    const runtime = extensionRuntime();
+    if (!runtime || typeof runtime.sendMessage !== "function") {
+      return Promise.reject(new Error(
+        "La conexión con la extensión de XDM no está disponible. Recarga esta página y vuelve a intentarlo.",
+      ));
+    }
+
+    if (globalThis.browser?.runtime === runtime) {
+      try {
+        return Promise.resolve(runtime.sendMessage(message)).catch(error => {
+          throw extensionMessageError(error);
+        });
+      } catch (error) {
+        return Promise.reject(extensionMessageError(error));
+      }
+    }
+
+    try {
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        const succeed = value => {
+          if (settled) return;
+          settled = true;
+          resolve(value);
+        };
+        const fail = error => {
+          if (settled) return;
+          settled = true;
+          reject(extensionMessageError(error));
+        };
+        const callback = value => {
+          const lastError = runtime.lastError;
+          if (lastError) fail(new Error(lastError.message || "No se pudo contactar el puente de XDM."));
+          else succeed(value);
+        };
+        const response = runtime.sendMessage(message, callback);
+        if (response && typeof response.then === "function") {
+          response.then(succeed, fail);
+        }
+      });
+    } catch (error) {
+      return Promise.reject(extensionMessageError(error));
+    }
+  }
+
+  function providerForUrl(rawUrl) {
+    try {
+      const url = new URL(rawUrl);
+      const host = url.hostname.toLowerCase().replace(/\.$/, "");
+      return (globalThis.XDM_SITE_CATALOG?.providers || []).find(provider =>
+        (provider.domains || []).some(domain => host === domain || host.endsWith(`.${domain}`)),
+      ) || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function hasVideoId(rawUrl, provider) {
+    try {
+      const url = new URL(rawUrl);
+      const player = provider?.browser?.player || {};
+      let candidate = "";
+      if ((player.short_link_domains || []).includes(url.hostname)) {
+        candidate = url.pathname.split("/").filter(Boolean)[0] || "";
+      } else {
+        candidate = url.searchParams.get(player.video_id_query || "") || "";
+        if (!candidate) {
+          for (const prefix of player.video_path_prefixes || []) {
+            if (url.pathname.startsWith(prefix)) {
+              candidate = url.pathname.slice(prefix.length).split("/")[0] || "";
+              break;
+            }
+          }
+        }
+      }
+      return Boolean(candidate && new RegExp(`^(?:${player.video_id_pattern || "[A-Za-z0-9_-]{11}"})$`).test(candidate));
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function composedParent(element) {
+    if (element?.parentElement) return element.parentElement;
+    const root = element?.getRootNode?.();
+    return root && root !== element && root.host ? root.host : null;
+  }
+
+  function videoTargetFor(video) {
+    const provider = providerForUrl(location.href);
+    if (!provider) return { pageUrl: location.href, title: document.title };
+
+    const preview = provider.browser?.preview || {};
+    const cardSelectors = Array.isArray(preview.card_selectors) ? preview.card_selectors : [];
+    const linkSelectors = Array.isArray(preview.link_selectors) ? preview.link_selectors : [];
+    let card = null;
+    for (let node = video; node && node !== document.documentElement; node = composedParent(node)) {
+      if (cardSelectors.some(selector => {
+        try { return node.matches(selector); } catch (_) { return false; }
+      })) {
+        card = node;
+        break;
+      }
+    }
+
+    if (card && linkSelectors.length) {
+      const links = new Set();
+      for (const selector of linkSelectors) {
+        try {
+          if (card.matches(selector)) links.add(card);
+          for (const link of card.querySelectorAll(selector)) links.add(link);
+        } catch (_) {}
+      }
+      for (const link of links) {
+        const href = link.href || link.getAttribute("href");
+        if (!href) continue;
+        let pageUrl;
+        try { pageUrl = new URL(href, location.href).href; } catch (_) { continue; }
+        if (!providerForUrl(pageUrl) || !hasVideoId(pageUrl, provider)) continue;
+
+        let title = String(link.getAttribute("title") || link.getAttribute("aria-label") || "").trim();
+        if (!title) {
+          for (const selector of preview.title_selectors || []) {
+            try {
+              title = String(card.querySelector(selector)?.textContent || "").trim();
+            } catch (_) { title = ""; }
+            if (title) break;
+          }
+        }
+        return { pageUrl, title: title.slice(0, 500) || document.title };
+      }
+    }
+
+    // If this video belongs to a thumbnail card, never fall back to the
+    // currently open watch URL. That could send the wrong video to XDM.
+    if (card) return null;
+    if (hasVideoId(location.href, provider)) {
+      return { pageUrl: location.href, title: document.title };
+    }
+    // A preview without a matching video link must not accidentally request
+    // the search/feed URL as though it were an individual video.
+    if (cardSelectors.length) return null;
+    return { pageUrl: location.href, title: document.title };
   }
 
   function hasUsableFormats(response) {
@@ -51,12 +202,12 @@
     while (map.size > FORMAT_CACHE_LIMIT) map.delete(map.keys().next().value);
   }
 
-  function requestFormats(pageUrl) {
+  function requestFormats(pageUrl, title = document.title) {
     const entry = { pageUrl, promise: null };
     entry.promise = sendBridgeMessage({
       type: "xdm-companion:get-formats",
       pageUrl,
-      title: document.title,
+      title,
     }).then(response => {
       if (hasUsableFormats(response)) {
         remember(cachedFormats, pageUrl, { response, expiresAt: Date.now() + FORMAT_CACHE_TTL_MS });
@@ -77,7 +228,7 @@
     return entry.promise;
   }
 
-  async function getFormats(pageUrl, { retryEmpty = false } = {}) {
+  async function getFormats(pageUrl, { retryEmpty = false, title = document.title } = {}) {
     const now = Date.now();
     const cached = cachedFormats.get(pageUrl);
     if (cached && cached.expiresAt > now) {
@@ -93,7 +244,7 @@
       if (hasUsableFormats(response) || !retryEmpty) return response;
       // A click is an explicit request. If prefetch ran before player data was
       // ready, retry once now.
-      return requestFormats(pageUrl);
+      return requestFormats(pageUrl, title);
     }
 
     const failure = recentFormatFailures.get(pageUrl);
@@ -105,12 +256,17 @@
       return failure.response;
     }
     recentFormatFailures.delete(pageUrl);
-    return requestFormats(pageUrl);
+    return requestFormats(pageUrl, title);
   }
 
-  function prefetchFormats(pageUrl = location.href) {
-    if (pageUrl !== location.href) return;
-    void getFormats(pageUrl).catch(() => {});
+  function prefetchFormats(pageUrl = activePageUrl || location.href, title = activeTitle || document.title) {
+    if (!pageUrl) return;
+    void getFormats(pageUrl, { title }).catch(() => {});
+  }
+
+  function prefetchVideo(video) {
+    const target = videoTargetFor(video);
+    if (target) prefetchFormats(target.pageUrl, target.title);
   }
 
   function syncPageContext() {
@@ -119,21 +275,29 @@
     observedPageUrl = pageUrl;
     pageGeneration += 1;
     playerDataRetries.clear();
+    const liveVideo = activeVideo?.isConnected ? activeVideo : null;
+    const activeTarget = liveVideo ? videoTargetFor(liveVideo) : null;
+    const provider = providerForUrl(pageUrl);
+    const currentPageCanResolve = !provider || hasVideoId(pageUrl, provider);
+    activePageUrl = activeTarget?.pageUrl || (liveVideo ? "" : currentPageCanResolve ? pageUrl : "");
+    activeTitle = activeTarget?.title || (activePageUrl ? document.title : "");
 
     const menuWasOpen = Boolean(ui && ui.widget.classList.contains("open"));
     if (ui) {
       ui.session = null;
-      ui.pageUrl = pageUrl;
+      ui.pageUrl = activePageUrl;
       ui.choices.replaceChildren();
-      ui.status.textContent = "Preparando resoluciones…";
+      ui.status.textContent = activePageUrl
+        ? "Preparando resoluciones…"
+        : "No se pudo identificar el video de esta vista previa.";
       ui.trigger.disabled = false;
     }
 
     if (menuWasOpen && activeVideo) {
       // Keep an already-open picker useful when the site changes videos.
       void loadFormats();
-    } else {
-      prefetchFormats(pageUrl);
+    } else if (activePageUrl) {
+      prefetchFormats(activePageUrl, activeTitle);
     }
     return true;
   }
@@ -218,7 +382,22 @@
     trigger.setAttribute("aria-expanded", "false");
     const buttonArt = document.createElement("img");
     buttonArt.className = "button-art";
-    buttonArt.src = chrome.runtime.getURL("icons/xdm-download-button.png");
+    const runtime = extensionRuntime();
+    if (typeof runtime?.getURL === "function") {
+      buttonArt.src = runtime.getURL("icons/xdm-download-button.png");
+    } else {
+      buttonArt.style.display = "none";
+      const fallbackArt = document.createElement("span");
+      fallbackArt.textContent = "XDM";
+      fallbackArt.style.cssText = [
+        "padding:8px 18px",
+        "border-radius:999px",
+        "background:linear-gradient(110deg,#368de0,#8748db)",
+        "color:white",
+        "font:700 14px system-ui,sans-serif",
+      ].join(";");
+      trigger.append(fallbackArt);
+    }
     buttonArt.alt = "";
     buttonArt.setAttribute("aria-hidden", "true");
     trigger.append(buttonArt);
@@ -290,19 +469,26 @@
   function showFor(video) {
     const controls = createUi();
     if (!controls) return;
+    const target = videoTargetFor(video);
+    const targetUrl = target?.pageUrl || "";
+    const targetTitle = target?.title || "";
     cancelHide();
-    if (activeVideo !== video) {
+    if (activeVideo !== video || activePageUrl !== targetUrl) {
       controls.widget.classList.remove("open");
       controls.trigger.setAttribute("aria-expanded", "false");
       controls.session = null;
       controls.pageUrl = null;
       controls.choices.replaceChildren();
-      controls.status.textContent = "Pulsa el botón para buscar resoluciones.";
+      controls.status.textContent = targetUrl
+        ? "Pulsa el botón para buscar resoluciones."
+        : "No se pudo identificar el video de esta vista previa. Abre el video y vuelve a intentarlo.";
     }
     activeVideo = video;
+    activePageUrl = targetUrl;
+    activeTitle = targetTitle;
     // Begin while the user is hovering the video, before opening the picker.
     // Playback events also warm the cache when the pointer is elsewhere.
-    prefetchFormats();
+    prefetchFormats(targetUrl, targetTitle);
     controls.widget.removeAttribute("hidden");
     controls.widget.classList.add("visible");
     positionUi();
@@ -360,7 +546,13 @@
 
   async function loadFormats() {
     if (!ui || !activeVideo) return;
-    const pageUrl = location.href;
+    const pageUrl = activePageUrl;
+    const pageTitle = activeTitle || document.title;
+    if (!pageUrl) {
+      openMenu();
+      ui.status.textContent = "No se pudo identificar el enlace de esta vista previa. Abre el video y vuelve a intentarlo.";
+      return;
+    }
     const generation = pageGeneration;
     ui.session = null;
     ui.pageUrl = pageUrl;
@@ -370,8 +562,8 @@
     cancelMenuAutoClose();
     openMenu();
     try {
-      const response = await getFormats(pageUrl, { retryEmpty: true });
-      if (generation !== pageGeneration || pageUrl !== location.href) return;
+      const response = await getFormats(pageUrl, { retryEmpty: true, title: pageTitle });
+      if (generation !== pageGeneration || pageUrl !== activePageUrl) return;
       if (!response || !response.ok) throw new Error(response && response.message || "No se pudieron obtener las resoluciones.");
       const formats = Array.isArray(response.formats) ? response.formats : [];
       if (!formats.length) {
@@ -379,6 +571,7 @@
         return;
       }
       ui.session = response.session;
+      ui.pageTitle = pageTitle;
       const activeAudio = response.audio_track;
       const audioLabel = activeAudio && (activeAudio.name || activeAudio.language);
       const statusParts = [];
@@ -387,10 +580,10 @@
       ui.status.textContent = statusParts.join(" · ");
       for (const format of formats) addFormatChoice(format);
     } catch (error) {
-      if (generation !== pageGeneration || pageUrl !== location.href) return;
+      if (generation !== pageGeneration || pageUrl !== activePageUrl) return;
       ui.status.textContent = error.message || "XDM Companion no está disponible.";
     } finally {
-      if (generation === pageGeneration && pageUrl === location.href) {
+      if (generation === pageGeneration && pageUrl === activePageUrl) {
         ui.trigger.disabled = false;
         positionUi();
         scheduleMenuAutoClose();
@@ -430,7 +623,7 @@
       const response = await sendBridgeMessage({
         type: "xdm-companion:select-format",
         pageUrl,
-        title: document.title,
+        title: ui.pageTitle || activeTitle || document.title,
         session,
         formatId: format.format_id,
       });
@@ -462,12 +655,12 @@
     video.addEventListener("playing", () => {
       syncPageContext();
       const rect = video.getBoundingClientRect();
-      if (rect.width >= 240 && rect.height >= 135) prefetchFormats();
+      if (rect.width >= 240 && rect.height >= 135) prefetchVideo(video);
     }, { passive: true });
     video.addEventListener("loadedmetadata", () => {
       syncPageContext();
       const rect = video.getBoundingClientRect();
-      if (rect.width >= 240 && rect.height >= 135) prefetchFormats();
+      if (rect.width >= 240 && rect.height >= 135) prefetchVideo(video);
     }, { passive: true });
     video.addEventListener("pointerenter", () => showFor(video), { passive: true });
     video.addEventListener("pointermove", () => {
@@ -494,7 +687,7 @@
     // The content script can be injected after playback already started.
     if (!video.paused && !video.ended) {
       const rect = video.getBoundingClientRect();
-      if (rect.width >= 240 && rect.height >= 135) prefetchFormats();
+      if (rect.width >= 240 && rect.height >= 135) prefetchVideo(video);
     }
   }
 
@@ -532,6 +725,8 @@
     const cached = cachedFormats.get(pageUrl);
     if ((cached && cached.expiresAt > Date.now()) || pendingFormats.has(pageUrl)
         || playerDataRetries.has(pageUrl)) return;
+    const provider = providerForUrl(pageUrl);
+    if (provider && !hasVideoId(pageUrl, provider)) return;
 
     // Some sites publish player data just after navigation. Retry an early
     // empty/failing prefetch once, without creating a request storm.

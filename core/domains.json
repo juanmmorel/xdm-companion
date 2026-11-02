@@ -43,7 +43,27 @@
           "video_id_query": "v",
           "short_link_domains": ["youtu.be"],
           "video_path_prefixes": ["/shorts/", "/embed/", "/live/"],
-          "video_id_pattern": "[A-Za-z0-9_-]{11}"
+          "video_id_pattern": "[A-Za-z0-9_-]{11}",
+          "audio_codec_prefixes": ["mp4a", "aac", "opus", "vorbis", "ac-3", "ec-3", "eac3", "flac", "alac"],
+          "video_codec_prefixes": ["avc", "av01", "vp8", "vp9", "hev", "hvc", "dvh", "theora"]
+        },
+        "preview": {
+          "card_selectors": [
+            "ytd-rich-item-renderer",
+            "ytd-video-renderer",
+            "ytd-grid-video-renderer",
+            "ytd-compact-video-renderer",
+            "ytd-playlist-video-renderer",
+            "ytd-reel-item-renderer"
+          ],
+          "link_selectors": [
+            "a#thumbnail[href]",
+            "a#video-title[href]",
+            "a#video-title-link[href]",
+            "a[href*='/shorts/']",
+            "a[href*='/live/']"
+          ],
+          "title_selectors": ["a#video-title", "a#video-title-link"]
         }
       },
       "backend": {

@@ -10,6 +10,8 @@ function collectPlayerData(expectedVideoId, playerConfig) {
     formats: 0,
     adaptive_formats: 0,
     video_formats: 0,
+    audio_formats: 0,
+    audio_streams_present: null,
     direct_video_formats: 0,
     encrypted_video_formats: 0,
     drm_marked_formats: 0,
@@ -124,12 +126,28 @@ function collectPlayerData(expectedVideoId, playerConfig) {
     ...(Array.isArray(streaming?.formats) ? streaming.formats : []),
     ...(Array.isArray(streaming?.adaptiveFormats) ? streaming.adaptiveFormats : []),
   ];
+  const audioCodecPrefixes = (Array.isArray(playerConfig.audio_codec_prefixes)
+    ? playerConfig.audio_codec_prefixes : [])
+    .map(value => String(value || "").toLowerCase())
+    .filter(Boolean);
+  const containsAudio = format => {
+    const mimeType = String(format?.mimeType || "");
+    if (mimeType.toLowerCase().startsWith("audio/")) return true;
+    const codecMatch = /codecs\s*=\s*["']?([^"';]+)/i.exec(mimeType);
+    return Boolean(codecMatch && codecMatch[1].split(",").some(codec =>
+      audioCodecPrefixes.some(prefix => codec.trim().toLowerCase().startsWith(prefix)),
+    ));
+  };
+  const audioFormats = allFormats.filter(containsAudio);
+  diagnostics.audio_formats = audioFormats.length;
+  diagnostics.audio_streams_present = audioFormats.length > 0;
   diagnostics.formats = Array.isArray(streaming?.formats) ? streaming.formats.length : 0;
   diagnostics.adaptive_formats = Array.isArray(streaming?.adaptiveFormats)
     ? streaming.adaptiveFormats.length : 0;
   const current = player?.getAudioTrack?.();
   let available = [];
   try { available = Array.from(player.getAvailableAudioTracks?.() || []); } catch (_) {}
+  diagnostics.available_audio_track_count = available.length;
   const captionAudioTracks = response?.captions?.playerCaptionsTracklistRenderer?.audioTracks || [];
   const defaultAudioTrackIndex = Number(
     response?.captions?.playerCaptionsTracklistRenderer?.defaultAudioTrackIndex,
@@ -144,21 +162,30 @@ function collectPlayerData(expectedVideoId, playerConfig) {
       || /\boriginal\b/i.test(trackName(track))
     ),
   );
-  const originalTrack = available.find(isOriginalTrack)
+  const hasNonOriginalMarker = track => Boolean(
+    track && (track.audioIsDefault === false || track.isDefault === false),
+  );
+  const explicitOriginalTrack = available.find(isOriginalTrack)
     || allFormats.map(format => format.audioTrack).find(isOriginalTrack)
     || captionAudioTracks.find(isOriginalTrack)
     || captionDefaultTrack
     || (isOriginalTrack(current) ? current : null);
+  const inferredUniqueTrack = !explicitOriginalTrack && diagnostics.audio_streams_present
+      && available.length === 1 && !hasNonOriginalMarker(available[0])
+    ? available[0]
+    : null;
+  const originalTrack = explicitOriginalTrack || inferredUniqueTrack;
   const language = trackLanguage(originalTrack);
   const name = trackName(originalTrack);
   const id = trackId(originalTrack);
-  const audioTrack = (!language && !name && !id)
+  const audioTrack = !originalTrack
     ? null
     : {
         language: String(language).slice(0, 40),
         name: String(name).slice(0, 100),
         id: String(id).slice(0, 128),
         is_original: true,
+        ...(inferredUniqueTrack ? { inferred: true } : {}),
       };
   const videoFormats = allFormats.filter(format =>
     String(format?.mimeType || "").toLowerCase().startsWith("video/"),
@@ -209,6 +236,7 @@ function collectPlayerData(expectedVideoId, playerConfig) {
     playback: {
       video_id: videoId,
       title: String(response?.videoDetails?.title || "").slice(0, 500),
+      audio_streams_present: diagnostics.audio_streams_present,
       dash_manifest_url: streaming?.dashManifestUrl || "",
       source_heights: sourceHeights,
       formats,
@@ -245,12 +273,13 @@ function expectedVideoId(pageUrl, playerConfig) {
 }
 
 async function readPlayback(tabId, pageUrl, provider) {
-  if (!Number.isInteger(tabId) || !globalThis.chrome?.scripting?.executeScript) {
+  const extensionApi = globalThis.browser || globalThis.chrome;
+  if (!Number.isInteger(tabId) || !extensionApi?.scripting?.executeScript) {
     return { playback: null, diagnostics: { script_available: false } };
   }
   const playerConfig = provider?.browser?.player || {};
   try {
-    const results = await chrome.scripting.executeScript({
+    const results = await extensionApi.scripting.executeScript({
       target: { tabId },
       world: "MAIN",
       args: [expectedVideoId(pageUrl, playerConfig), playerConfig],

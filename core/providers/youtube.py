@@ -38,32 +38,51 @@ def _youtube_original_audio_track(info, audio_track=None):
   if isinstance(audio_track, dict) and audio_track.get("is_original") is True:
     return audio_track
   audio_formats = []
+  audio_names = set()
+  audio_ids = set()
   for video_format in (info or {}).get("formats") or []:
     if not isinstance(video_format, dict):
       continue
     if str(video_format.get("acodec") or "").lower() in {"", "none"}:
       continue
     audio_formats.append(video_format)
-    is_original = _is_original_audio_format(video_format)
     track_id = str(video_format.get("audio_track_id") or "").strip()[:128]
+    if track_id:
+      audio_ids.add(track_id.casefold())
     language = _normalize_language(video_format.get("language"))
     if not language and track_id:
       language = _normalize_language(track_id.split(".", 1)[0])
-    if is_original and language:
+    track = video_format.get("audio_track")
+    track = track if isinstance(track, dict) else {}
+    track_name = str(
+        video_format.get("audio_track_name") or track.get("name")
+        or track.get("displayName") or "",
+    ).strip()[:100]
+    if track_name:
+      audio_names.add(track_name.casefold())
+    try:
+      language_preference = float(video_format.get("language_preference") or 0)
+    except (TypeError, ValueError):
+      language_preference = 0
+    explicitly_non_original = (
+        video_format.get("audio_track_is_default") is False
+        or language_preference <= -10
+    )
+    if _is_original_audio_format(video_format) and not explicitly_non_original:
       return {
           "language": language,
           "id": track_id,
-          "name": "",
+          "name": track_name,
           "is_original": True,
       }
 
   # Some YouTube clients omit both the explicit original marker and the DASH
   # master manifest. In that case yt-dlp can still expose the audio-only
-  # renditions. Treat one unambiguous language/track as the original, but do
-  # not guess when multiple tracks, an explicit non-default marker, or an
-  # audio-description stream exists.
+  # renditions. Accept a uniquely identified track even when it has no language
+  # tag, but do not guess when multiple tracks or non-original markers exist.
   languages = set()
-  track_ids = set()
+  track_ids = set(audio_ids)
+  names = set(audio_names)
   has_non_default_marker = False
   has_descriptive_track = False
   for video_format in audio_formats:
@@ -82,17 +101,22 @@ def _youtube_original_audio_track(info, audio_track=None):
         has_descriptive_track = True
     except (TypeError, ValueError):
       pass
+  unambiguous_identity = len(track_ids) <= 1 and len(names) <= 1
+  has_unique_language = len(languages) == 1
+  has_no_language = not languages
+  no_language_identity_is_unique = bool(track_ids or names) or len(audio_formats) == 1
   if (
-      len(languages) == 1
-      and len(track_ids) <= 1
+      audio_formats
+      and unambiguous_identity
+      and (has_unique_language or (has_no_language and no_language_identity_is_unique))
       and not has_non_default_marker
       and not has_descriptive_track
   ):
-    only_language = next(iter(languages))
+    only_language = next(iter(languages), "")
     return {
         "language": only_language,
         "id": next(iter(track_ids), ""),
-        "name": "",
+        "name": next(iter(names), ""),
         "is_original": True,
         "inferred": True,
     }
@@ -162,8 +186,15 @@ def _safe_youtube_playback(value, page_url, audio_track=None, cookies=None):
 
     codec_match = re.search(r"codecs\s*=\s*[\"']?([^\"';]+)", raw_mime, re.IGNORECASE)
     codecs = [codec.strip().lower() for codec in (codec_match.group(1).split(",") if codec_match else [])]
-    audio_prefixes = ("mp4a", "opus", "vorbis", "ac-3", "ec-3", "eac3", "flac", "alac")
-    video_prefixes = ("avc", "av01", "vp8", "vp9", "hev", "hvc", "dvh", "theora")
+    player_config = BROWSER_CONFIG.get("player", {})
+    audio_prefixes = tuple(
+        str(prefix).lower() for prefix in player_config.get("audio_codec_prefixes", [])
+        if isinstance(prefix, str) and prefix
+    )
+    video_prefixes = tuple(
+        str(prefix).lower() for prefix in player_config.get("video_codec_prefixes", [])
+        if isinstance(prefix, str) and prefix
+    )
     audio_codec = next((codec for codec in codecs if codec.startswith(audio_prefixes)), "")
     video_codec = next((codec for codec in codecs if codec.startswith(video_prefixes)), "")
     if mime_type.startswith("audio/"):
@@ -235,9 +266,9 @@ def _safe_youtube_playback(value, page_url, audio_track=None, cookies=None):
       normalized["manifest_url"] = manifest_url
     formats.append(normalized)
 
-  if not formats:
+  if not formats and not (manifest_url and source_heights):
     return None
-  return {
+  playback = {
       "title": str(value.get("title") or f"Video de {display_name()}").strip()[:500],
       "formats": formats,
       "availability": "public",
@@ -249,6 +280,57 @@ def _safe_youtube_playback(value, page_url, audio_track=None, cookies=None):
           "flags": [],
       },
   }
+  player_audio_streams_present = value.get("audio_streams_present")
+  if isinstance(player_audio_streams_present, bool):
+    playback["_xdm_companion_player_audio_streams_present"] = player_audio_streams_present
+  if player_audio_streams_present is True or any(
+      str(item.get("acodec") or "").lower() not in {"", "none"}
+      for item in formats if isinstance(item, dict)
+  ):
+    playback["_xdm_companion_audio_streams_present"] = True
+  if manifest_url:
+    playback["_xdm_companion_dash_manifest_url"] = manifest_url
+  return playback
+
+def _attach_manifest_backed_formats(info):
+  """Expose player-announced tiers as candidates backed by its DASH manifest.
+
+  The player often reports a height while withholding a direct URL for that
+  representation. XDM consumes the MPD, so a direct per-representation URL is
+  not required; the manifest preflight below decides which tiers are usable.
+  """
+  if not isinstance(info, dict):
+    return
+  manifest_url = str(info.get("_xdm_companion_dash_manifest_url") or "")
+  if not manifest_url or not _youtube_manifest_url_is_safe(manifest_url):
+    return
+  formats = info.get("formats")
+  if not isinstance(formats, list):
+    formats = []
+    info["formats"] = formats
+  known_heights = {
+      int(height) for height in (info.get("_xdm_companion_source_heights") or [])
+      if isinstance(height, int) and height > 0
+  }
+  existing_ids = {
+      str(item.get("format_id") or "")
+      for item in formats if isinstance(item, dict)
+  }
+  for height in sorted(known_heights, reverse=True):
+    format_id = f"companion-dash-{height}"
+    if format_id in existing_ids:
+      continue
+    formats.append({
+        "format_id": format_id,
+        "url": manifest_url,
+        "manifest_url": manifest_url,
+        "height": height,
+        "vcodec": "dash",
+        "acodec": "none",
+        "ext": "mp4",
+        "protocol": "http_dash_segments",
+        "mime_type": "application/dash+xml",
+    })
 
 def _has_youtube_account_cookies(cookies):
   cookie_host = str(BACKEND_CONFIG.get("playback_cookie_host") or "")
@@ -326,6 +408,12 @@ def _safe_youtube_diagnostics(payload):
       "player_formats": count(player.get("formats")),
       "player_adaptive_formats": count(player.get("adaptive_formats")),
       "player_video_formats": count(player.get("video_formats")),
+      "player_audio_formats": count(player.get("audio_formats")),
+      "player_audio_track_count": count(player.get("available_audio_track_count")),
+      "player_audio_streams_present": (
+          player.get("audio_streams_present")
+          if isinstance(player.get("audio_streams_present"), bool) else None
+      ),
       "player_direct_formats": count(player.get("direct_video_formats")),
       "player_encrypted_formats": count(player.get("encrypted_video_formats")),
       "player_drm_formats": count(player.get("drm_marked_formats")),
@@ -377,8 +465,10 @@ def _youtube_format_diagnostics(info, audio_track=None):
       "formats": 0,
       "video": 0,
       "audio_only": 0,
+      "audio_streams": 0,
       "video_with_url": 0,
       "video_with_audio": 0,
+      "video_with_audio_direct": 0,
       "video_only_with_url": 0,
       "video_only_with_manifest": 0,
       "video_only_without_manifest": 0,
@@ -408,6 +498,7 @@ def _youtube_format_diagnostics(info, audio_track=None):
     has_video = video_codec not in {"", "none"}
     has_audio = audio_codec not in {"", "none"}
     if has_audio:
+      summary["audio_streams"] += 1
       language = _normalize_language(item.get("language"))
       track_id = str(item.get("audio_track_id") or "").strip()
       if not language and track_id:
@@ -440,6 +531,8 @@ def _youtube_format_diagnostics(info, audio_track=None):
           summary["video_with_url_heights"].add(height)
       if has_audio:
         summary["video_with_audio"] += 1
+        if has_url:
+          summary["video_with_audio_direct"] += 1
         if has_audio and _is_original_audio_format(item, original_track):
           summary["muxed_original"] += 1
         elif item.get("audio_track_is_default") is False:
@@ -466,6 +559,38 @@ def _youtube_format_diagnostics(info, audio_track=None):
   summary["audio_language_count"] = len(audio_languages)
   summary["audio_track_id_count"] = len(audio_track_ids)
   return summary
+
+
+def _youtube_silent_video_confirmed(
+    browser_info, extractor_info, extractor_summary, audio_track=None,
+):
+  """Require matching player and extractor evidence before allowing video-only media."""
+  if not isinstance(browser_info, dict) or not isinstance(extractor_info, dict):
+    return False
+  if isinstance(audio_track, dict) and any(
+      audio_track.get(key) for key in ("language", "id", "name")
+  ):
+    return False
+  if browser_info.get("_xdm_companion_player_audio_streams_present") is not False:
+    return False
+  if not (browser_info.get("_xdm_companion_source_heights") or []):
+    return False
+  if any(item.get("has_drm") for item in browser_info.get("formats") or [] if isinstance(item, dict)):
+    return False
+  if not isinstance(extractor_summary, dict):
+    return False
+  if extractor_summary.get("formats", 0) <= 0 or extractor_summary.get("video", 0) <= 0:
+    return False
+  if extractor_summary.get("audio_streams", 0) > 0:
+    return False
+  if extractor_info.get("_has_drm") or extractor_info.get("availability") in {
+      "needs_auth", "subscriber_only", "premium_only",
+  }:
+    return False
+  diagnostics = extractor_info.get("_xdm_companion_diagnostics") or {}
+  if "po_token_required" in (diagnostics.get("flags") or []):
+    return False
+  return True
 
 def _youtube_manifest_url_is_safe(raw_url):
   try:
@@ -507,6 +632,109 @@ def _is_dash_audio_adaptation(adaptation):
       return True
   return False
 
+def _is_dash_video_adaptation(adaptation):
+  content_type = str(adaptation.get("contentType") or "").lower()
+  mime_type = str(adaptation.get("mimeType") or "").lower()
+  if content_type == "video" or mime_type.startswith("video/"):
+    return True
+  for representation in adaptation:
+    if _element_local_name(representation) != "Representation":
+      continue
+    representation_mime = str(representation.get("mimeType") or "").lower()
+    if representation_mime.startswith("video/"):
+      return True
+    if representation.get("height") or representation.get("width"):
+      return True
+  return False
+
+def _dash_audio_identity_values(adaptation):
+  identifiers = set()
+  labels = set()
+  for attribute in ("id", "audioTrackId", "trackId"):
+    value = str(adaptation.get(attribute) or "").strip().casefold()
+    if value:
+      identifiers.add(value)
+  label = str(adaptation.get("label") or adaptation.get("name") or "").strip().casefold()
+  if label:
+    labels.add(label)
+  for child in adaptation:
+    child_name = _element_local_name(child)
+    if child_name == "Label" and (child.text or "").strip():
+      labels.add(child.text.strip().casefold())
+    if child_name == "Representation":
+      for attribute in ("id", "audioTrackId", "trackId"):
+        value = str(child.get(attribute) or "").strip().casefold()
+        if value:
+          identifiers.add(value)
+      rep_label = str(child.get("label") or child.get("name") or "").strip().casefold()
+      if rep_label:
+        labels.add(rep_label)
+  return identifiers, labels
+
+def _exclude_protected_dash_tracks(root):
+  """Remove protected representation/adaptation units, never just their DRM markers.
+
+  XDM rejects a DASH document containing any ContentProtection element. A marker on
+  the MPD or Period has broad/ambiguous scope, so fail closed. A marker scoped to a
+  Representation or AdaptationSet lets us omit that complete protected unit while
+  keeping independent clear tracks for XDM.
+  """
+  parents = {child: parent for parent in root.iter() for child in parent}
+  protected_scopes = set()
+  for element in root.iter():
+    if _element_local_name(element) != "ContentProtection":
+      continue
+    ancestor = parents.get(element)
+    scope = None
+    while ancestor is not None:
+      name = _element_local_name(ancestor)
+      if name in {"Representation", "AdaptationSet"}:
+        scope = ancestor
+        break
+      if name in {"Period", "MPD"}:
+        raise CompanionError(
+            f"El manifiesto de {display_name()} declara protección para un ámbito completo; "
+            "no se enviará a XDM porque no se puede separar con seguridad una pista sin protección."
+        )
+      ancestor = parents.get(ancestor)
+    if scope is None:
+      raise CompanionError(
+          f"El manifiesto de {display_name()} contiene protección con un alcance desconocido; "
+          "no se enviará a XDM."
+      )
+    protected_scopes.add(scope)
+
+  if not protected_scopes:
+    return 0
+
+  top_level_scopes = []
+  for scope in protected_scopes:
+    ancestor = parents.get(scope)
+    while ancestor is not None and ancestor not in protected_scopes:
+      ancestor = parents.get(ancestor)
+    if ancestor is None:
+      top_level_scopes.append(scope)
+  for scope in top_level_scopes:
+    parent = parents.get(scope)
+    if parent is not None:
+      parent.remove(scope)
+
+  # A representation-level marker may have removed the last representation in a set.
+  # Drop that empty set as well so XDM does not treat it as a usable stream.
+  for period in [item for item in root.iter() if _element_local_name(item) == "Period"]:
+    for adaptation in list(period):
+      if _element_local_name(adaptation) != "AdaptationSet":
+        continue
+      if not any(_element_local_name(child) == "Representation" for child in adaptation):
+        period.remove(adaptation)
+
+  if any(_element_local_name(item) == "ContentProtection" for item in root.iter()):
+    raise CompanionError(
+        f"El manifiesto de {display_name()} contiene protección que no se pudo aislar con seguridad; "
+        "no se enviará a XDM."
+    )
+  return len(protected_scopes)
+
 def _resolve_dash_base_urls(root, manifest_url):
   """Make BaseURL references absolute before the manifest is served locally."""
   root_base_urls = [child for child in root if _element_local_name(child) == "BaseURL"]
@@ -537,12 +765,16 @@ def _resolve_dash_base_urls(root, manifest_url):
 
   visit(root, manifest_url)
 
-def _filter_dash_manifest(manifest_body, manifest_url, preferred_language):
-  if not preferred_language:
+def _filter_dash_manifest(
+    manifest_body, manifest_url, preferred_language,
+    preferred_track_id="", preferred_track_name="", allow_video_only=False,
+    allow_single_audio_track=False,
+):
+  if not preferred_language and not allow_video_only and not allow_single_audio_track:
     raise CompanionError(f"{display_name()} no informó el idioma de audio que está reproduciendo el navegador.")
   if len(manifest_body) > MAX_MANIFEST_BYTES:
     raise CompanionError(f"El manifiesto de {display_name()} supera el tamaño permitido.")
-  upper_body = manifest_body[:4096].upper()
+  upper_body = manifest_body.upper()
   if b"<!DOCTYPE" in upper_body or b"<!ENTITY" in upper_body:
     raise CompanionError(f"El manifiesto de {display_name()} no tiene un formato XML seguro.")
   try:
@@ -550,16 +782,114 @@ def _filter_dash_manifest(manifest_body, manifest_url, preferred_language):
   except ET.ParseError as error:
     raise CompanionError(f"{display_name()} no entregó un manifiesto DASH válido.") from error
 
+  if allow_video_only:
+    if any(_element_local_name(item) == "ContentProtection" for item in root.iter()):
+      raise CompanionError(
+          f"El manifiesto de {display_name()} contiene protección DRM; no se enviará a XDM."
+      )
+    periods = [element for element in root.iter() if _element_local_name(element) == "Period"]
+    if not periods:
+      raise CompanionError(f"El manifiesto de {display_name()} no contiene periodos descargables.")
+    for period in periods:
+      has_video = any(
+          _element_local_name(element) == "AdaptationSet" and _is_dash_video_adaptation(element)
+          for element in period
+      )
+      has_audio = any(
+          _element_local_name(element) == "AdaptationSet" and _is_dash_audio_adaptation(element)
+          for element in period
+      )
+      if not has_video or has_audio:
+        raise CompanionError(
+            f"El manifiesto de {display_name()} no confirma un video realmente silencioso."
+        )
+    _resolve_dash_base_urls(root, manifest_url)
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+  protected_scopes = _exclude_protected_dash_tracks(root)
+
+  if not preferred_language and allow_single_audio_track:
+    if protected_scopes:
+      raise CompanionError(
+          f"El manifiesto de {display_name()} contiene pistas protegidas; "
+          "no se puede identificar con certeza la pista musical original."
+      )
+    periods = [element for element in root.iter() if _element_local_name(element) == "Period"]
+    if not periods:
+      raise CompanionError(f"El manifiesto de {display_name()} no contiene periodos descargables.")
+    preferred_id = str(preferred_track_id or "").strip().casefold()
+    preferred_name = str(preferred_track_name or "").strip().casefold()
+    for period in periods:
+      period_video = [
+          element for element in period
+          if _element_local_name(element) == "AdaptationSet" and _is_dash_video_adaptation(element)
+      ]
+      period_audio = [
+          element for element in period
+          if _element_local_name(element) == "AdaptationSet" and _is_dash_audio_adaptation(element)
+      ]
+      if not period_video or not period_audio:
+        raise CompanionError(
+            f"El manifiesto de {display_name()} no contiene una pista de video y audio completa."
+        )
+
+      matching = []
+      if preferred_id:
+        matching = [
+            adaptation for adaptation in period_audio
+            if preferred_id in _dash_audio_identity_values(adaptation)[0]
+        ]
+        has_manifest_ids = any(_dash_audio_identity_values(item)[0] for item in period_audio)
+        if not matching and has_manifest_ids:
+          raise CompanionError(
+              f"El manifiesto de {display_name()} no coincide con el identificador de la pista original."
+          )
+      if not matching and preferred_name:
+        matching = [
+            adaptation for adaptation in period_audio
+            if preferred_name in _dash_audio_identity_values(adaptation)[1]
+        ]
+        has_manifest_names = any(_dash_audio_identity_values(item)[1] for item in period_audio)
+        if not matching and has_manifest_names:
+          raise CompanionError(
+              f"El manifiesto de {display_name()} no coincide con el nombre de la pista original."
+          )
+      if not matching and len(period_audio) == 1:
+        matching = period_audio
+      if len(matching) != 1:
+        raise CompanionError(
+            f"El manifiesto de {display_name()} ofrece varias pistas sin idioma identificable; "
+            "no se elegirá una al azar."
+        )
+      for adaptation in period_audio:
+        if adaptation not in matching:
+          period.remove(adaptation)
+
+    _resolve_dash_base_urls(root, manifest_url)
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
   target = _canonical_language(preferred_language).split("-", 1)[0]
   found_audio = False
   retained_audio = 0
   for period in [element for element in root.iter() if _element_local_name(element) == "Period"]:
+    period_video = [
+        element for element in period
+        if _element_local_name(element) == "AdaptationSet" and _is_dash_video_adaptation(element)
+    ]
     period_audio = [
         element for element in period
         if _element_local_name(element) == "AdaptationSet" and _is_dash_audio_adaptation(element)
     ]
+    if not period_video:
+      raise CompanionError(
+          f"El manifiesto de {display_name()} no contiene una pista de video sin protección "
+          "que XDM pueda descargar."
+      )
     if not period_audio:
-      continue
+      raise CompanionError(
+          f"El manifiesto de {display_name()} no conserva una pista de audio compatible; "
+          "no se enviará video sin audio a XDM."
+      )
     found_audio = True
     matching = []
     best_match_score = 0
@@ -583,6 +913,28 @@ def _filter_dash_manifest(manifest_body, manifest_url, preferred_language):
           f"El manifiesto de {display_name()} no contiene audio en {preferred_language}; "
           "no se envió a XDM para evitar descargar una pista en otro idioma."
       )
+    if len(matching) > 1:
+      track_id = str(preferred_track_id or "").strip().casefold()
+      track_name = str(preferred_track_name or "").strip().casefold()
+      identity_matches = []
+      if track_id:
+        identity_matches = [
+            adaptation for adaptation in matching
+            if track_id in _dash_audio_identity_values(adaptation)[0]
+        ]
+      if len(identity_matches) != 1 and track_name:
+        identity_matches = [
+            adaptation for adaptation in matching
+            if track_name in _dash_audio_identity_values(adaptation)[1]
+        ]
+      if len(identity_matches) == 1:
+        matching = identity_matches
+      else:
+        raise CompanionError(
+            f"El manifiesto de {display_name()} ofrece varias pistas de audio en "
+            f"{preferred_language} y no permite identificar con certeza la original; "
+            "no se enviará a XDM para evitar elegir otra pista."
+        )
     retained_audio += len(matching)
     for adaptation in period_audio:
       if adaptation not in matching:
@@ -655,14 +1007,25 @@ def _read_youtube_manifest(manifest_url, headers, cookie):
       response.close()
     session.close()
 
-def _register_manifest_proxy(manifest_url, headers, cookie, preferred_language):
-  if not preferred_language:
+def _register_manifest_proxy(
+    manifest_url, headers, cookie, preferred_language,
+    preferred_track_id="", preferred_track_name="", allow_video_only=False,
+    allow_single_audio_track=False,
+):
+  if not preferred_language and not allow_video_only and not allow_single_audio_track:
     raise CompanionError(
         f"{display_name()} no informó el idioma de audio que está reproduciendo el navegador. "
         "Recarga el video y vuelve a abrir el selector para evitar descargar otro idioma."
     )
   raw_body, final_url = _read_youtube_manifest(manifest_url, headers, cookie)
-  filtered_body = _filter_dash_manifest(raw_body, final_url, preferred_language)
+  filtered_body = _filter_dash_manifest(
+      raw_body, final_url, preferred_language, preferred_track_id, preferred_track_name,
+      allow_video_only=allow_video_only,
+      allow_single_audio_track=allow_single_audio_track,
+  )
+  return _store_manifest_proxy(filtered_body)
+
+def _store_manifest_proxy(filtered_body):
   token = uuid.uuid4().hex
   now = time.time()
   with _manifest_proxies_lock:
@@ -682,6 +1045,240 @@ def _register_manifest_proxy(manifest_url, headers, cookie, preferred_language):
     }
   service_url = SITE_CATALOG.get("companion", {}).get("service_url", "http://127.0.0.1:21121")
   return f"{service_url}/manifest/{token}.mpd"
+
+def _dash_video_heights(manifest_body):
+  root = ET.fromstring(manifest_body)
+  heights = set()
+  for period in [element for element in root.iter() if _element_local_name(element) == "Period"]:
+    for adaptation in period:
+      if _element_local_name(adaptation) != "AdaptationSet" or not _is_dash_video_adaptation(adaptation):
+        continue
+      inherited_height = adaptation.get("height")
+      for representation in adaptation:
+        if _element_local_name(representation) != "Representation":
+          continue
+        try:
+          height = int(representation.get("height") or inherited_height or 0)
+        except (TypeError, ValueError):
+          continue
+        if height > 0:
+          heights.add(height)
+  return sorted(heights, reverse=True)
+
+def _dash_xdm_video_heights(manifest_body):
+  """Return video tiers with segment addressing understood by XDM's MPD parser."""
+  root = ET.fromstring(manifest_body)
+  usable_heights = set()
+  root_has_duration = bool(root.get("mediaPresentationDuration"))
+  for period in [element for element in root.iter() if _element_local_name(element) == "Period"]:
+    period_has_base = any(
+        _element_local_name(element) == "SegmentBase" for element in period.iter()
+    )
+    period_has_duration = root_has_duration or bool(period.get("duration"))
+    for adaptation in period:
+      if _element_local_name(adaptation) != "AdaptationSet" or not _is_dash_video_adaptation(adaptation):
+        continue
+      for representation in adaptation:
+        if _element_local_name(representation) != "Representation":
+          continue
+        try:
+          height = int(representation.get("height") or adaptation.get("height") or 0)
+        except (TypeError, ValueError):
+          continue
+        if height <= 0:
+          continue
+
+        # XDM accepts SegmentBase at period scope, SegmentList inside a
+        # representation, or SegmentTemplate inherited from representation,
+        # adaptation, or period. Match those parser rules before offering a tier.
+        has_addressing = period_has_base or any(
+            _element_local_name(element) == "SegmentBase"
+            for element in representation.iter()
+        )
+        if not has_addressing:
+          for element in representation.iter():
+            if _element_local_name(element) != "SegmentList":
+              continue
+            if any(
+                _element_local_name(segment) == "SegmentURL"
+                and (segment.get("media") or segment.get("mediaRange"))
+                for segment in element.iter()
+            ):
+              has_addressing = True
+              break
+
+        if not has_addressing:
+          for owner in (representation, adaptation, period):
+            template = next((
+                child for child in owner
+                if _element_local_name(child) == "SegmentTemplate"
+            ), None)
+            if template is None:
+              continue
+            media = str(template.get("media") or "").strip()
+            timeline = next((
+                child for child in template
+                if _element_local_name(child) == "SegmentTimeline"
+            ), None)
+            timeline_entries = [
+                child for child in timeline or []
+                if _element_local_name(child) == "S"
+            ]
+            if media and timeline_entries:
+              has_addressing = True
+            elif media and period_has_duration:
+              try:
+                duration = int(template.get("duration") or 1)
+                timescale = int(template.get("timescale") or 1)
+              except (TypeError, ValueError):
+                duration = timescale = 0
+              has_addressing = duration > 0 and timescale > 0
+            if has_addressing:
+              break
+        if has_addressing:
+          usable_heights.add(height)
+  return sorted(usable_heights, reverse=True)
+
+def _preflight_dash_options(available):
+  """Keep only listed DASH heights present in a safe, audio-filtered MPD.
+
+  On a transient manifest fetch failure, retain the current option and let the
+  handoff retry. A parsed manifest that proves a quality protected, missing, or
+  ambiguous is excluded before the browser offers it to the user.
+  """
+  checked = {}
+  filtered = []
+  removed_option = False
+  protected_removed = False
+  rejection_message = ""
+  for option, media in available:
+    source_url = str(media.get("source_manifest_url") or "")
+    if not source_url or "dash" not in str(media.get("protocol") or "").lower():
+      filtered.append((option, media))
+      continue
+
+    key = (
+        source_url,
+        media.get("audio_language") or "",
+        media.get("audio_track_id") or "",
+        media.get("audio_track_name") or "",
+        media.get("cookie") or "",
+        media.get("audio_absence_confirmed") is True,
+        media.get("audio_track_is_original") is True,
+        media.get("audio_track_inferred") is True,
+        media.get("audio_streams_present_confirmed") is True,
+    )
+    if key not in checked:
+      try:
+        raw_body, final_url = _read_youtube_manifest(
+            source_url, media.get("headers") or {}, media.get("cookie"),
+        )
+      except CompanionError:
+        checked[key] = ("retry-on-selection", None)
+      else:
+        has_protection = False
+        try:
+          # XML element names are literal, so this bounded byte check avoids an
+          # extra parse before _filter_dash_manifest applies its XML safeguards.
+          has_protection = b"ContentProtection" in raw_body
+          allow_video_only = media.get("audio_absence_confirmed") is True
+          allow_single_audio_track = bool(
+              media.get("audio_streams_present_confirmed") is True
+              or (
+                  media.get("audio_track_is_original") is True
+                  and (
+                      media.get("audio_track_inferred") is True
+                      or media.get("audio_track_id")
+                      or media.get("audio_track_name")
+                  )
+              )
+          )
+          if allow_video_only and has_protection:
+            raise CompanionError(
+                f"El manifiesto de {display_name()} contiene protección DRM; no se enviará a XDM."
+            )
+          filtered_body = _filter_dash_manifest(
+              raw_body,
+              final_url,
+              media.get("audio_language") or "",
+              media.get("audio_track_id") or "",
+              media.get("audio_track_name") or "",
+              allow_video_only=allow_video_only,
+              allow_single_audio_track=allow_single_audio_track,
+          )
+          heights = set(_dash_xdm_video_heights(filtered_body))
+          if not heights:
+            raise CompanionError(
+                f"El manifiesto de {display_name()} no contiene resoluciones DASH que XDM pueda procesar."
+            )
+          proxy_url = _store_manifest_proxy(filtered_body)
+          checked[key] = ("ready", (heights, proxy_url, has_protection, dict(media)))
+        except (CompanionError, ET.ParseError) as error:
+          checked[key] = ("rejected", (error, has_protection))
+
+    state, result = checked[key]
+    if state == "retry-on-selection":
+      filtered.append((option, media))
+      continue
+    if state == "rejected":
+      removed_option = True
+      if result[1]:
+        protected_removed = True
+      if not rejection_message:
+        rejection_message = str(result[0])
+      continue
+
+    heights, proxy_url, has_protection, _prototype_media = result
+    if has_protection:
+      protected_removed = True
+    if int(option.get("height") or 0) not in heights:
+      removed_option = True
+      continue
+    prepared_media = dict(media)
+    prepared_media["url"] = proxy_url
+    prepared_media["source_manifest_url"] = ""
+    prepared_media["protocol"] = "http_dash_segments"
+    prepared_media["mime_type"] = "application/dash+xml"
+    if (
+        not prepared_media.get("audio_language")
+        and prepared_media.get("audio_streams_present_confirmed") is True
+    ):
+      # The MPD preflight has proved that exactly one clear audio adaptation
+      # exists, so preserve it as the selected original track for handoff.
+      prepared_media["audio_track_is_original"] = True
+      prepared_media["audio_track_inferred"] = True
+    filtered.append((option, prepared_media))
+
+  # The player can report quality tiers that have no direct URL and therefore
+  # did not enter `available`. Add every complete clear tier found in the MPD.
+  # The same sanitized proxy keeps XDM on the original audio track.
+  offered_heights = {
+      int(option.get("height") or 0) for option, _media in filtered
+  }
+  for state, result in checked.values():
+    if state != "ready":
+      continue
+    heights, proxy_url, _has_protection, prototype = result
+    for height in sorted(heights - offered_heights, reverse=True):
+      prepared_media = dict(prototype)
+      prepared_media["url"] = proxy_url
+      prepared_media["source_manifest_url"] = ""
+      prepared_media["protocol"] = "http_dash_segments"
+      prepared_media["mime_type"] = "application/dash+xml"
+      prepared_media["height"] = height
+      format_id = f"companion-dash-{height}"
+      filtered.append(({
+          "format_id": format_id,
+          "height": height,
+          "fps": None,
+          "ext": prepared_media.get("ext") or "mp4",
+          "filesize": "",
+          "label": f"{height}p (sin audio)" if prototype.get("audio_absence_confirmed") else f"{height}p",
+          "audio_language": prepared_media.get("audio_language") or "",
+      }, prepared_media))
+      offered_heights.add(height)
+
+  return filtered, removed_option, protected_removed, rejection_message
 
 
 def get_manifest_proxy(token, now=None):
@@ -763,9 +1360,29 @@ def extraction_diagnostics(authenticated, flags):
 
 
 def accepts_format(video_format, audio_preferences, original_audio_language,
-                   is_dash_manifest, has_audio, is_original_audio):
+                   is_dash_manifest, has_audio, is_original_audio,
+                   audio_absence_confirmed=False,
+                   audio_streams_present_confirmed=False,
+                   allow_unlabelled_muxed=False):
   if not has_audio:
-    return bool(is_dash_manifest and original_audio_language)
+    if audio_absence_confirmed:
+      return True
+    selected_audio_track = bool(
+        (audio_preferences or {}).get("is_original") is True
+        and (
+            (audio_preferences or {}).get("inferred") is True
+            or (audio_preferences or {}).get("id")
+            or (audio_preferences or {}).get("name")
+        )
+    )
+    return bool(
+        is_dash_manifest
+        and (
+            original_audio_language
+            or selected_audio_track
+            or audio_streams_present_confirmed
+        )
+    )
 
   format_track_id = str(video_format.get("audio_track_id") or "").strip()
   original_track_id = str((audio_preferences or {}).get("id") or "").strip()
@@ -792,10 +1409,26 @@ def accepts_format(video_format, audio_preferences, original_audio_language,
   inferred_single_track = bool(
       (audio_preferences or {}).get("inferred") is True and not known_non_original
   )
+  audio_track = video_format.get("audio_track")
+  audio_track = audio_track if isinstance(audio_track, dict) else {}
+  track_name = str(
+      video_format.get("audio_track_name") or audio_track.get("name")
+      or audio_track.get("displayName") or "",
+  ).strip()
+  unlabelled_complete_stream = bool(
+      has_audio
+      and not is_dash_manifest
+      and allow_unlabelled_muxed
+      and not actual_language
+      and not format_track_id
+      and not track_name
+      and not known_non_original
+  )
   return bool(
       is_original_audio or exact_track_match
       or (language_matches and not known_non_original)
       or inferred_single_track
+      or unlabelled_complete_stream
   )
 
 
@@ -809,6 +1442,20 @@ def prepare_media_for_handoff(media):
         media.get("headers") or {},
         media.get("cookie"),
         media.get("audio_language") or "",
+        media.get("audio_track_id") or "",
+        media.get("audio_track_name") or "",
+        allow_video_only=media.get("audio_absence_confirmed") is True,
+        allow_single_audio_track=bool(
+            media.get("audio_streams_present_confirmed") is True
+            or (
+                media.get("audio_track_is_original") is True
+                and (
+                    media.get("audio_track_inferred") is True
+                    or media.get("audio_track_id")
+                    or media.get("audio_track_name")
+                )
+            )
+        ),
     )
   return media
 
@@ -843,6 +1490,7 @@ def resolve_format_options(
   browser_info = _safe_youtube_playback(
       payload.get(browser_key), page_url, audio_track, cookies,
   )
+  _attach_manifest_backed_formats(browser_info)
   available = available_formats(
       browser_info, page_url, cookies, user_agent, audio_track, accept_language,
   ) if browser_info else []
@@ -854,6 +1502,7 @@ def resolve_format_options(
   should_compare_extractor = not available or player_max > browser_max
   info = browser_info
   extractor_format_summary = {}
+  extracted_info = None
   if should_compare_extractor:
     try:
       extracted_info = extract_info(
@@ -864,6 +1513,7 @@ def resolve_format_options(
         raise
     else:
       extractor_format_summary = _youtube_format_diagnostics(extracted_info, audio_track)
+      extractor_audio_present = extractor_format_summary.get("audio_streams", 0) > 0
       if browser_info:
         # Video-only extractor tiers can be paired with the original audio
         # metadata supplied by the playback page.
@@ -872,6 +1522,11 @@ def resolve_format_options(
             *(browser_info.get("formats") or []),
             *(extracted_info.get("formats") or []),
         ]
+        if (
+            browser_info.get("_xdm_companion_audio_streams_present") is True
+            or extractor_audio_present
+        ):
+          info["_xdm_companion_audio_streams_present"] = True
         if "_has_drm" in extracted_info:
           info["_has_drm"] = extracted_info.get("_has_drm")
         if extracted_info.get("availability") in {
@@ -888,11 +1543,17 @@ def resolve_format_options(
             browser_diagnostics.get("flags") or []
         ).union(extractor_diagnostics.get("flags") or []))
         info["_xdm_companion_diagnostics"] = browser_diagnostics
+        if _youtube_silent_video_confirmed(
+            browser_info, extracted_info, extractor_format_summary, audio_track,
+        ):
+          info["_xdm_companion_audio_absence_confirmed"] = True
         available = available_formats(
             info, page_url, cookies, user_agent, audio_track, accept_language,
         )
       else:
         info = extracted_info
+        if extractor_audio_present:
+          info["_xdm_companion_audio_streams_present"] = True
         available = available_formats(
             info, page_url, cookies, user_agent, audio_track, accept_language,
         )
@@ -901,6 +1562,13 @@ def resolve_format_options(
     available = available_formats(
         info, page_url, cookies, user_agent, audio_track, accept_language,
     )
+  available, filtered_dash_options, filtered_protected_dash, dash_rejection = _preflight_dash_options(
+      available,
+  )
+  if filtered_protected_dash:
+    info["_has_drm"] = True
+  if dash_rejection:
+    info["_xdm_companion_dash_rejection"] = dash_rejection
   inventory = format_inventory(info, available)
   if not available:
     diagnostics = info.get("_xdm_companion_diagnostics") or {}
@@ -909,10 +1577,11 @@ def resolve_format_options(
     logger.warning(
         "%s formats unavailable (cookie_count=%s, account_markers=%s, "
         "cookie_queries=%s, player_found=%s, player_formats=%s, "
-        "player_direct_formats=%s, player_encrypted_formats=%s, "
+        "player_direct_formats=%s, player_audio_formats=%s, player_audio_track_count=%s, "
+        "player_audio_streams_present=%s, player_encrypted_formats=%s, "
         "player_heights=%s, player_dash_manifest=%s, session_authenticated=%s, "
         "extractor_flags=%s, extractor_formats=%s, extractor_summary=%s, "
-        "combined_summary=%s, drm_formats_filtered=%s)",
+        "combined_summary=%s, audio_absence_confirmed=%s, drm_formats_filtered=%s)",
         display_name(),
         safe_diagnostics["cookie_count"],
         safe_diagnostics["account_markers"],
@@ -920,6 +1589,9 @@ def resolve_format_options(
         safe_diagnostics["player_found"],
         safe_diagnostics["player_video_formats"],
         safe_diagnostics["player_direct_formats"],
+        safe_diagnostics["player_audio_formats"],
+        safe_diagnostics["player_audio_track_count"],
+        safe_diagnostics["player_audio_streams_present"],
         safe_diagnostics["player_encrypted_formats"],
         safe_diagnostics["player_source_heights"],
         safe_diagnostics["player_dash_manifest"],
@@ -928,6 +1600,7 @@ def resolve_format_options(
         extractor_format_summary.get("formats", 0),
         extractor_format_summary,
         combined_format_summary,
+        info.get("_xdm_companion_audio_absence_confirmed") is True,
         "drm_formats_filtered" in (diagnostics.get("flags") or []),
     )
     if info.get("availability") in {"needs_auth", "subscriber_only", "premium_only"}:
@@ -939,6 +1612,8 @@ def resolve_format_options(
       raise CompanionError(
           "Este video requiere una cuenta autorizada. Inicia sesión con una cuenta que tenga acceso."
       )
+    if info.get("_xdm_companion_dash_rejection"):
+      raise CompanionError(info["_xdm_companion_dash_rejection"])
     flags = set(diagnostics.get("flags") or [])
     if (
         diagnostics.get("yt_dlp_authenticated") is False
@@ -958,6 +1633,11 @@ def resolve_format_options(
           "El proveedor solo devolvió flujos marcados como DRM. XDM Companion no los descifra."
       )
     if diagnostics.get("yt_dlp_authenticated") is True:
+      if info.get("_xdm_companion_audio_absence_confirmed"):
+        raise CompanionError(
+            "Se confirmó que este video no tiene una pista de audio, pero no se encontró "
+            "una resolución que XDM pueda descargar."
+        )
       if not combined_format_summary.get("original_track_known"):
         raise CompanionError(
             "La sesión fue reconocida, pero no se identificó el audio original de este video. "
@@ -992,9 +1672,30 @@ def resolve_format_options(
         f"El proveedor anunció video hasta {highest_source}p, pero no entregó una pista completa que XDM pueda usar. "
         f"La mejor resolución compatible es {best_height}p."
     )
+  elif filtered_dash_options:
+    notice = (
+        "Se omitieron opciones DASH cuya resolución o pista de audio no pudo verificarse con seguridad. "
+        f"La mejor resolución compatible es {best_height}p."
+    )
   elif len(inventory["compatible_heights"]) == 1:
     notice = (
         f"El proveedor solo devolvió una resolución descargable ({best_height}p) para esta sesión. "
         "Comprueba que el reproductor haya terminado de cargar y vuelve a intentarlo."
+    )
+  if info.get("_xdm_companion_audio_absence_confirmed"):
+    silent_notice = "Este video no contiene una pista de audio; XDM lo descargará sin sonido."
+    notice = f"{notice} {silent_notice}" if notice else silent_notice
+  if highest_source > highest_compatible:
+    shape = _youtube_format_diagnostics(info, audio_track)
+    logger.warning(
+        "%s quality gap (source_heights=%s, compatible_heights=%s, "
+        "player_manifest_present=%s, dash_formats=%s, filtered_dash=%s, protected_filtered=%s)",
+        display_name(),
+        inventory["source_heights"],
+        inventory["compatible_heights"],
+        bool(info.get("_xdm_companion_dash_manifest_url")),
+        shape.get("video_only_with_manifest", 0),
+        filtered_dash_options,
+        filtered_protected_dash,
     )
   return info, available, inventory, store_session(available), notice

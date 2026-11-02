@@ -987,6 +987,49 @@ def test_dash_manifest_is_filtered_to_the_original_audio_language():
   ]
 
 
+def test_dash_manifest_keeps_a_unique_music_track_without_language():
+  manifest = b'''<MPD><Period>
+    <AdaptationSet id="video" contentType="video" mimeType="video/mp4">
+      <Representation id="v" height="1080" />
+    </AdaptationSet>
+    <AdaptationSet id="instrumental-track" contentType="audio" mimeType="audio/mp4">
+      <Representation id="a" audioSamplingRate="48000" />
+    </AdaptationSet>
+  </Period></MPD>'''
+
+  filtered = youtube_provider._filter_dash_manifest(
+      manifest,
+      "https://manifest.googlevideo.com/video.mpd",
+      "",
+      "instrumental-track",
+      allow_single_audio_track=True,
+  )
+  adaptations = [
+      element for element in main.ET.fromstring(filtered).iter()
+      if youtube_provider._element_local_name(element) == "AdaptationSet"
+  ]
+
+  assert [element.get("id") for element in adaptations] == ["video", "instrumental-track"]
+
+
+def test_dash_manifest_does_not_guess_between_unlabelled_audio_tracks():
+  manifest = b'''<MPD><Period>
+    <AdaptationSet contentType="video"><Representation id="v" height="1080" /></AdaptationSet>
+    <AdaptationSet id="music-a" contentType="audio"><Representation id="a" audioSamplingRate="48000" /></AdaptationSet>
+    <AdaptationSet id="music-b" contentType="audio"><Representation id="b" audioSamplingRate="48000" /></AdaptationSet>
+  </Period></MPD>'''
+
+  try:
+    youtube_provider._filter_dash_manifest(
+        manifest, "https://manifest.googlevideo.com/video.mpd", "",
+        allow_single_audio_track=True,
+    )
+  except main.CompanionError as error:
+    assert "varias pistas sin idioma identificable" in str(error)
+  else:
+    raise AssertionError("Multiple unlabelled audio tracks must not be selected at random")
+
+
 def test_dash_manifest_refuses_to_fall_back_to_a_different_audio_language():
   manifest = b'''<MPD><Period>
     <AdaptationSet contentType="video"><Representation id="v" /></AdaptationSet>
@@ -1001,13 +1044,291 @@ def test_dash_manifest_refuses_to_fall_back_to_a_different_audio_language():
     raise AssertionError("A mismatched-language MPD must not be handed to XDM")
 
 
+def test_dash_manifest_excludes_whole_protected_tracks_and_keeps_clear_quality():
+  manifest = b'''<MPD><Period>
+    <AdaptationSet id="video" contentType="video" mimeType="video/mp4">
+      <Representation id="v2160" height="2160">
+        <ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011" value="cenc" />
+      </Representation>
+      <Representation id="v1440" height="1440" />
+      <Representation id="v1080" height="1080" />
+    </AdaptationSet>
+    <AdaptationSet id="es.1" contentType="audio" mimeType="audio/mp4" lang="es">
+      <Representation id="es.1" />
+    </AdaptationSet>
+    <AdaptationSet id="en.1" contentType="audio" mimeType="audio/mp4" lang="en">
+      <ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011" value="cenc" />
+      <Representation id="en.1" />
+    </AdaptationSet>
+  </Period></MPD>'''
+
+  filtered = youtube_provider._filter_dash_manifest(
+      manifest, "https://manifest.googlevideo.com/video.mpd", "es", "es.1",
+  )
+  root = main.ET.fromstring(filtered)
+  names = [
+      element.get("id")
+      for element in root.iter()
+      if youtube_provider._element_local_name(element) == "Representation"
+  ]
+
+  assert names == ["v1440", "v1080", "es.1"]
+  assert not any(
+      youtube_provider._element_local_name(element) == "ContentProtection"
+      for element in root.iter()
+  )
+
+
+def test_dash_manifest_refuses_protection_with_ambiguous_global_scope():
+  for protection_scope in ("MPD", "Period"):
+    manifest = (
+        f"<{protection_scope}><ContentProtection schemeIdUri='cenc' />"
+        "<Period><AdaptationSet contentType='video'><Representation id='v' height='1080' />"
+        "</AdaptationSet><AdaptationSet contentType='audio' lang='es'><Representation id='a' />"
+        "</AdaptationSet></Period></MPD>"
+        if protection_scope == "MPD"
+        else "<MPD><Period><ContentProtection schemeIdUri='cenc' />"
+        "<AdaptationSet contentType='video'><Representation id='v' height='1080' />"
+        "</AdaptationSet><AdaptationSet contentType='audio' lang='es'><Representation id='a' />"
+        "</AdaptationSet></Period></MPD>"
+    ).encode()
+    try:
+      youtube_provider._filter_dash_manifest(
+          manifest, "https://manifest.googlevideo.com/video.mpd", "es",
+      )
+    except main.CompanionError as error:
+      assert "protección" in str(error)
+    else:
+      raise AssertionError("Broad-scope protection must not be stripped from a manifest")
+
+
+def test_dash_manifest_refuses_when_all_video_representations_are_protected():
+  manifest = b'''<MPD><Period>
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <Representation id="v2160" height="2160">
+        <ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011" value="cenc" />
+      </Representation>
+    </AdaptationSet>
+    <AdaptationSet contentType="audio" lang="es"><Representation id="a" /></AdaptationSet>
+  </Period></MPD>'''
+  try:
+    youtube_provider._filter_dash_manifest(
+        manifest, "https://manifest.googlevideo.com/video.mpd", "es",
+    )
+  except main.CompanionError as error:
+    assert "pista de video sin protección" in str(error)
+  else:
+    raise AssertionError("A protected-only video manifest must not be handed to XDM")
+
+
+def test_dash_manifest_uses_exact_audio_track_id_when_language_is_ambiguous():
+  manifest = b'''<MPD><Period>
+    <AdaptationSet contentType="video"><Representation id="v" height="1080" /></AdaptationSet>
+    <AdaptationSet id="en.1" contentType="audio" lang="en"><Representation id="en.1" /></AdaptationSet>
+    <AdaptationSet id="en.2" contentType="audio" lang="en"><Representation id="en.2" /></AdaptationSet>
+  </Period></MPD>'''
+
+  filtered = youtube_provider._filter_dash_manifest(
+      manifest, "https://manifest.googlevideo.com/video.mpd", "en", "en.1",
+  )
+  audio_ids = [
+      element.get("id")
+      for element in main.ET.fromstring(filtered).iter()
+      if youtube_provider._element_local_name(element) == "AdaptationSet"
+      and youtube_provider._is_dash_audio_adaptation(element)
+  ]
+
+  assert audio_ids == ["en.1"]
+
+
+def test_dash_manifest_refuses_ambiguous_same_language_audio_without_track_identity():
+  manifest = b'''<MPD><Period>
+    <AdaptationSet contentType="video"><Representation id="v" height="1080" /></AdaptationSet>
+    <AdaptationSet id="en.1" contentType="audio" lang="en"><Representation id="a1" /></AdaptationSet>
+    <AdaptationSet id="en.2" contentType="audio" lang="en"><Representation id="a2" /></AdaptationSet>
+  </Period></MPD>'''
+  try:
+    youtube_provider._filter_dash_manifest(
+        manifest, "https://manifest.googlevideo.com/video.mpd", "en",
+    )
+  except main.CompanionError as error:
+    assert "varias pistas de audio" in str(error)
+  else:
+    raise AssertionError("Ambiguous same-language audio tracks must not be guessed")
+
+
+def test_dash_preflight_hides_protected_heights_and_reuses_the_filtered_manifest(monkeypatch):
+  manifest = b'''<MPD mediaPresentationDuration="PT10S"><Period>
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentTemplate timescale="1" duration="2" media="video/$RepresentationID$-$Number$.m4s" initialization="video-init-$RepresentationID$.mp4" />
+      <Representation id="v2160" height="2160">
+        <ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011" value="cenc" />
+      </Representation>
+      <Representation id="v1440" height="1440" />
+    </AdaptationSet>
+    <AdaptationSet id="es.1" contentType="audio" lang="es">
+      <SegmentTemplate timescale="1" duration="2" media="audio/$RepresentationID$-$Number$.m4s" initialization="audio-init-$RepresentationID$.mp4" />
+      <Representation id="es.1" />
+    </AdaptationSet>
+  </Period></MPD>'''
+  reads = []
+  monkeypatch.setattr(
+      youtube_provider,
+      "_read_youtube_manifest",
+      lambda url, headers, cookie: reads.append(url) or (
+          manifest, "https://manifest.googlevideo.com/video.mpd",
+      ),
+  )
+  media = {
+      "url": "https://manifest.googlevideo.com/video.mpd",
+      "source_manifest_url": "https://manifest.googlevideo.com/video.mpd",
+      "protocol": "http_dash_segments",
+      "mime_type": "application/dash+xml",
+      "headers": {},
+      "cookie": "",
+      "audio_language": "es",
+      "audio_track_id": "es.1",
+  }
+  available = [
+      ({"format_id": "dash-2160", "height": 2160}, dict(media)),
+      ({"format_id": "dash-1440", "height": 1440}, dict(media)),
+  ]
+  with youtube_provider._manifest_proxies_lock:
+    youtube_provider._manifest_proxies.clear()
+
+  filtered, removed, protected, rejection = youtube_provider._preflight_dash_options(available)
+
+  assert [option["height"] for option, _media in filtered] == [1440]
+  assert removed is True
+  assert protected is True
+  assert rejection == ""
+  assert reads == ["https://manifest.googlevideo.com/video.mpd"]
+  prepared = filtered[0][1]
+  assert prepared["source_manifest_url"] == ""
+  assert prepared["url"].startswith("http://127.0.0.1:21121/manifest/")
+  token = prepared["url"].rsplit("/", 1)[1].removesuffix(".mpd")
+  proxy = youtube_provider.get_manifest_proxy(token)
+  assert proxy is not None
+  proxied_root = main.ET.fromstring(proxy["body"])
+  representations = [
+      element.get("id") for element in proxied_root.iter()
+      if youtube_provider._element_local_name(element) == "Representation"
+  ]
+  assert representations == ["v1440", "es.1"]
+  assert not any(
+      youtube_provider._element_local_name(element) == "ContentProtection"
+      for element in proxied_root.iter()
+  )
+
+
+def test_player_dash_manifest_adds_high_tier_without_direct_format_url(monkeypatch):
+  page_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+  playback = {
+      "video_id": "dQw4w9WgXcQ",
+      "title": "Video con 1440p solo en DASH",
+      "dash_manifest_url": "https://manifest.googlevideo.com/video.mpd",
+      "source_heights": [1440, 1080],
+      "formats": [],
+      "audio_track": {
+          "id": "en.1", "name": "English (Original)", "language": "en", "is_original": True,
+      },
+  }
+  manifest = b'''<MPD mediaPresentationDuration="PT10S"><Period>
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentTemplate timescale="1" duration="2" media="video/$RepresentationID$-$Number$.m4s" initialization="video-init-$RepresentationID$.mp4" />
+      <Representation id="v1440" height="1440" />
+      <Representation id="v1080" height="1080" />
+    </AdaptationSet>
+    <AdaptationSet id="en.1" contentType="audio" mimeType="audio/mp4" lang="en">
+      <SegmentTemplate timescale="1" duration="2" media="audio/$RepresentationID$-$Number$.m4s" initialization="audio-init-$RepresentationID$.mp4" />
+      <Representation id="en.1" />
+    </AdaptationSet>
+  </Period></MPD>'''
+  monkeypatch.setattr(
+      youtube_provider,
+      "_read_youtube_manifest",
+      lambda url, headers, cookie: (manifest, url),
+  )
+
+  info = youtube_provider._safe_youtube_playback(
+      playback, page_url, playback["audio_track"],
+  )
+  youtube_provider._attach_manifest_backed_formats(info)
+  available = main._available_formats(
+      info, page_url, [], "Test browser", playback["audio_track"],
+  )
+  assert [option["height"] for option, _media in available] == [1440, 1080]
+  assert any(
+      option["height"] == 1440 and media.get("source_manifest_url")
+      for option, media in available
+  )
+  assert all(media.get("audio_track_id") == "en.1" for _option, media in available)
+
+  filtered, _removed, _protected, rejection = youtube_provider._preflight_dash_options(available)
+
+  assert rejection == ""
+  assert [option["height"] for option, _media in filtered] == [1440, 1080]
+  assert filtered[0][1]["url"].startswith("http://127.0.0.1:21121/manifest/")
+
+
+def test_xdm_dash_preflight_does_not_offer_representations_without_segment_addressing():
+  manifest = b'''<MPD><Period>
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <Representation id="unusable" height="2160" />
+      <Representation id="usable" height="1440">
+        <SegmentTemplate timescale="1" duration="2" media="video/$RepresentationID$-$Number$.m4s" />
+      </Representation>
+    </AdaptationSet>
+  </Period></MPD>'''
+
+  assert youtube_provider._dash_xdm_video_heights(manifest) == []
+
+  manifest_with_duration = manifest.replace(
+      b"<MPD>", b'<MPD mediaPresentationDuration="PT10S">',
+  )
+  assert youtube_provider._dash_xdm_video_heights(manifest_with_duration) == [1440]
+
+
+def test_dash_preflight_keeps_existing_option_if_manifest_fetch_is_temporarily_unavailable(monkeypatch):
+  def unavailable(*_args):
+    raise main.CompanionError("temporary fetch failure")
+
+  monkeypatch.setattr(youtube_provider, "_read_youtube_manifest", unavailable)
+  available = [({"format_id": "dash-1080", "height": 1080}, {
+      "url": "https://manifest.googlevideo.com/video.mpd",
+      "source_manifest_url": "https://manifest.googlevideo.com/video.mpd",
+      "protocol": "http_dash_segments",
+      "audio_language": "es",
+  })]
+
+  filtered, removed, protected, rejection = youtube_provider._preflight_dash_options(available)
+
+  assert filtered == available
+  assert removed is False
+  assert protected is False
+  assert rejection == ""
+
+
 def test_selected_youtube_dash_quality_is_sent_with_only_the_original_audio_track(monkeypatch):
   client = main.app.test_client()
   origin = "chrome-extension://" + "f" * 32
-  manifest = b'''<MPD><Period>
-    <AdaptationSet contentType="video"><Representation id="v" /></AdaptationSet>
-    <AdaptationSet contentType="audio" lang="es"><Representation id="a-es" /></AdaptationSet>
-    <AdaptationSet contentType="audio" lang="en"><Representation id="a-en" /></AdaptationSet>
+  manifest = b'''<MPD mediaPresentationDuration="PT10S"><Period>
+    <AdaptationSet contentType="video">
+      <SegmentTemplate timescale="1" duration="2" media="video/$RepresentationID$-$Number$.m4s" initialization="video-init-$RepresentationID$.mp4" />
+      <Representation id="v" height="2160" />
+    </AdaptationSet>
+    <AdaptationSet contentType="audio" lang="es">
+      <SegmentTemplate timescale="1" duration="2" media="audio/$RepresentationID$-$Number$.m4s" initialization="audio-init-$RepresentationID$.mp4" />
+      <Representation id="a-es" />
+    </AdaptationSet>
+    <AdaptationSet id="en.1" contentType="audio" lang="en">
+      <SegmentTemplate timescale="1" duration="2" media="audio/$RepresentationID$-$Number$.m4s" initialization="audio-init-$RepresentationID$.mp4" />
+      <Representation id="en.1" />
+    </AdaptationSet>
+    <AdaptationSet id="en.2" contentType="audio" lang="en">
+      <SegmentTemplate timescale="1" duration="2" media="audio/$RepresentationID$-$Number$.m4s" initialization="audio-init-$RepresentationID$.mp4" />
+      <Representation id="en.2" />
+    </AdaptationSet>
   </Period></MPD>'''
   info = {
       "title": "Video con audio seleccionado",
@@ -1078,6 +1399,13 @@ def test_selected_youtube_dash_quality_is_sent_with_only_the_original_audio_trac
       and youtube_provider._is_dash_audio_adaptation(element)
   ]
   assert audio_languages == ["en"]
+  audio_adaptation_ids = [
+      element.get("id")
+      for element in parsed.iter()
+      if youtube_provider._element_local_name(element) == "AdaptationSet"
+      and youtube_provider._is_dash_audio_adaptation(element)
+  ]
+  assert audio_adaptation_ids == ["en.1"]
 
 
 def test_direct_video_only_quality_is_sent_to_xdm_as_a_direct_download(monkeypatch):
@@ -1108,3 +1436,404 @@ def test_direct_video_only_quality_is_sent_to_xdm_as_a_direct_download(monkeypat
   assert requests[0][0] == f"{main.XDM_BASE_URL}/download"
   assert requests[0][1]["url"] == "https://cdn.example/stream?token=synthetic"
   assert requests[0][1]["mimeType"] == "video/mp4"
+
+
+def test_formats_allow_video_only_when_player_and_extractor_confirm_no_audio(monkeypatch):
+  page_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+  monkeypatch.setattr(main, "_ensure_xdm_ready", lambda: None)
+  monkeypatch.setattr(main, "_extract_video_info", lambda *_args: {
+      "title": "Silent upload",
+      "availability": "public",
+      "formats": [{
+          "format_id": "extractor-1080",
+          "url": "https://rr1---sn.googlevideo.com/videoplayback?itag=137",
+          "height": 1080,
+          "vcodec": "avc1",
+          "acodec": "none",
+          "ext": "mp4",
+      }],
+      "_xdm_companion_diagnostics": {"yt_dlp_authenticated": True, "flags": []},
+  })
+  response = main.app.test_client().post(
+      "/formats",
+      headers={"Origin": "chrome-extension://" + "a" * 32},
+      json={
+          "url": page_url,
+          "user_agent": "Test browser",
+          "cookies": [],
+          "youtube_playback": {
+              "video_id": "dQw4w9WgXcQ",
+              "audio_streams_present": False,
+              "source_heights": [1080],
+              "formats": [{
+                  "itag": 137,
+                  "url": "https://rr1---sn.googlevideo.com/videoplayback?itag=137",
+                  "mime_type": 'video/mp4; codecs="avc1.640028"',
+                  "height": 1080,
+              }],
+          },
+      },
+  )
+
+  assert response.status_code == 200
+  body = response.get_json()
+  assert body["formats"][0]["height"] == 1080
+  assert body["formats"][0]["label"] == "1080p (sin audio)"
+  assert "no contiene una pista de audio" in body["notice"]
+
+
+def test_confirmed_silent_dash_manifest_is_kept_video_only(monkeypatch):
+  manifest = b'''<MPD mediaPresentationDuration="PT10S"><Period>
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentTemplate timescale="1" duration="2" media="video/$RepresentationID$-$Number$.m4s" />
+      <Representation id="v1080" height="1080" />
+    </AdaptationSet>
+  </Period></MPD>'''
+  monkeypatch.setattr(
+      youtube_provider,
+      "_read_youtube_manifest",
+      lambda *_args: (manifest, "https://manifest.googlevideo.com/video.mpd"),
+  )
+  media = {
+      "url": "https://manifest.googlevideo.com/video.mpd",
+      "source_manifest_url": "https://manifest.googlevideo.com/video.mpd",
+      "protocol": "http_dash_segments",
+      "mime_type": "application/dash+xml",
+      "headers": {},
+      "cookie": "",
+      "audio_language": "",
+      "audio_absence_confirmed": True,
+  }
+  with youtube_provider._manifest_proxies_lock:
+    youtube_provider._manifest_proxies.clear()
+
+  filtered, removed, protected, rejection = youtube_provider._preflight_dash_options([
+      ({"format_id": "silent-dash-1080", "height": 1080, "label": "1080p (sin audio)"}, media),
+  ])
+
+  assert len(filtered) == 1
+  assert filtered[0][0]["label"] == "1080p (sin audio)"
+  assert filtered[0][1]["source_manifest_url"] == ""
+  assert removed is False
+  assert protected is False
+  assert rejection == ""
+  proxy_path = filtered[0][1]["url"].removeprefix("http://127.0.0.1:21121")
+  proxy = main.app.test_client().get(proxy_path)
+  assert proxy.status_code == 200
+  parsed = main.ET.fromstring(proxy.data)
+  assert not any(
+      youtube_provider._element_local_name(element) == "AdaptationSet"
+      and youtube_provider._is_dash_audio_adaptation(element)
+      for element in parsed.iter()
+  )
+
+  manifest_with_audio = manifest.replace(
+      b"</Period>",
+      b'<AdaptationSet contentType="audio" lang="en"><Representation id="a" /></AdaptationSet></Period>',
+  )
+  try:
+    youtube_provider._filter_dash_manifest(
+        manifest_with_audio, "https://manifest.googlevideo.com/video.mpd", "",
+        allow_video_only=True,
+    )
+  except main.CompanionError as error:
+    assert "no confirma un video realmente silencioso" in str(error)
+  else:
+    raise AssertionError("A silent video must not be assumed when the MPD has audio")
+
+
+def test_formats_keep_one_browser_confirmed_music_track_without_track_metadata(monkeypatch):
+  page_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+  manifest = b'''<MPD mediaPresentationDuration="PT10S"><Period>
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentTemplate timescale="1" duration="2" media="video/$RepresentationID$-$Number$.m4s" />
+      <Representation id="v1080" height="1080" />
+    </AdaptationSet>
+    <AdaptationSet id="music" contentType="audio" mimeType="audio/mp4">
+      <SegmentTemplate timescale="1" duration="2" media="audio/$RepresentationID$-$Number$.m4s" />
+      <Representation id="a" audioSamplingRate="48000" />
+    </AdaptationSet>
+  </Period></MPD>'''
+  monkeypatch.setattr(main, "_ensure_xdm_ready", lambda: None)
+  monkeypatch.setattr(
+      youtube_provider,
+      "_read_youtube_manifest",
+      lambda *_args: (manifest, "https://manifest.googlevideo.com/video.mpd"),
+  )
+  monkeypatch.setattr(
+      main,
+      "_extract_video_info",
+      lambda *_args: (_ for _ in ()).throw(AssertionError("the player already has the formats")),
+  )
+  sent = []
+
+  class XdmResponse:
+    status_code = 200
+
+  monkeypatch.setattr(
+      main.xdm_http,
+      "post",
+      lambda url, json, timeout: sent.append((url, json)) or XdmResponse(),
+  )
+  monkeypatch.setattr(main, "_start_detected_video", lambda *_args: None)
+  with main._format_sessions_lock:
+    main._format_sessions.clear()
+  with youtube_provider._manifest_proxies_lock:
+    youtube_provider._manifest_proxies.clear()
+  response = main.app.test_client().post(
+      "/formats",
+      headers={"Origin": "chrome-extension://" + "b" * 32},
+      json={
+          "url": page_url,
+          "user_agent": "Test browser",
+          "cookies": [],
+          "youtube_playback": {
+              "video_id": "dQw4w9WgXcQ",
+              "audio_streams_present": True,
+              "dash_manifest_url": "https://manifest.googlevideo.com/video.mpd",
+              "source_heights": [1080],
+              "formats": [],
+          },
+      },
+  )
+
+  assert response.status_code == 200
+  body = response.get_json()
+  assert body["formats"][0]["label"] == "1080p"
+  assert body["audio_track"] is None
+  selected = main.app.test_client().post(
+      "/select",
+      json={
+          "session": body["session"],
+          "format_id": body["formats"][0]["format_id"],
+      },
+      headers={"Origin": "chrome-extension://" + "b" * 32},
+  )
+
+  assert selected.status_code == 200
+  assert sent[0][0] == f"{main.XDM_BASE_URL}/media"
+  manifest_url = sent[0][1]["url"]
+  assert manifest_url.startswith("http://127.0.0.1:21121/manifest/")
+  proxied = main.app.test_client().get(
+      manifest_url.removeprefix("http://127.0.0.1:21121"),
+  )
+  assert proxied.status_code == 200
+  manifest_root = main.ET.fromstring(proxied.data)
+  audio_adaptations = [
+      element for element in manifest_root.iter()
+      if youtube_provider._element_local_name(element) == "AdaptationSet"
+      and youtube_provider._is_dash_audio_adaptation(element)
+  ]
+  assert len(audio_adaptations) == 1
+  assert audio_adaptations[0].get("id") == "music"
+
+
+def test_formats_reject_multiple_unlabelled_music_tracks_without_guessing(monkeypatch):
+  page_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+  manifest = b'''<MPD><Period>
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentTemplate timescale="1" duration="2" media="video/$RepresentationID$-$Number$.m4s" />
+      <Representation id="v1080" height="1080" />
+    </AdaptationSet>
+    <AdaptationSet id="music-a" contentType="audio" mimeType="audio/mp4">
+      <Representation id="a" audioSamplingRate="48000" />
+    </AdaptationSet>
+    <AdaptationSet id="music-b" contentType="audio" mimeType="audio/mp4">
+      <Representation id="b" audioSamplingRate="48000" />
+    </AdaptationSet>
+  </Period></MPD>'''
+  monkeypatch.setattr(main, "_ensure_xdm_ready", lambda: None)
+  monkeypatch.setattr(
+      youtube_provider,
+      "_read_youtube_manifest",
+      lambda *_args: (manifest, "https://manifest.googlevideo.com/video.mpd"),
+  )
+  response = main.app.test_client().post(
+      "/formats",
+      headers={"Origin": "chrome-extension://" + "c" * 32},
+      json={
+          "url": page_url,
+          "user_agent": "Test browser",
+          "cookies": [],
+          "youtube_playback": {
+              "video_id": "dQw4w9WgXcQ",
+              "audio_streams_present": True,
+              "dash_manifest_url": "https://manifest.googlevideo.com/video.mpd",
+              "source_heights": [1080],
+              "formats": [],
+          },
+      },
+  )
+
+  assert response.status_code == 422
+  assert "varias pistas sin idioma identificable" in response.get_json()["message"]
+
+
+def test_extractor_audio_evidence_recovers_when_player_does_not_report_track_metadata(monkeypatch):
+  page_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+  manifest = b'''<MPD mediaPresentationDuration="PT10S"><Period>
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentTemplate timescale="1" duration="2" media="video/$RepresentationID$-$Number$.m4s" />
+      <Representation id="v1080" height="1080" />
+    </AdaptationSet>
+    <AdaptationSet id="music" contentType="audio" mimeType="audio/mp4">
+      <SegmentTemplate timescale="1" duration="2" media="audio/$RepresentationID$-$Number$.m4s" />
+      <Representation id="a" audioSamplingRate="48000" />
+    </AdaptationSet>
+  </Period></MPD>'''
+  monkeypatch.setattr(main, "_ensure_xdm_ready", lambda: None)
+  monkeypatch.setattr(
+      youtube_provider,
+      "_read_youtube_manifest",
+      lambda *_args: (manifest, "https://manifest.googlevideo.com/video.mpd"),
+  )
+  monkeypatch.setattr(main, "_extract_video_info", lambda *_args: {
+      "title": "Instrumental video",
+      "availability": "public",
+      "formats": [
+          {
+              "format_id": "music-audio-low",
+              "url": "https://rr1---sn.googlevideo.com/audio-low",
+              "vcodec": "none",
+              "acodec": "opus",
+          },
+          {
+              "format_id": "music-audio-high",
+              "url": "https://rr1---sn.googlevideo.com/audio-high",
+              "vcodec": "none",
+              "acodec": "mp4a",
+          },
+      ],
+      "_xdm_companion_diagnostics": {"yt_dlp_authenticated": True, "flags": []},
+  })
+
+  response = main.app.test_client().post(
+      "/formats",
+      headers={"Origin": "chrome-extension://" + "d" * 32},
+      json={
+          "url": page_url,
+          "user_agent": "Test browser",
+          "cookies": [],
+          "youtube_playback": {
+              "video_id": "dQw4w9WgXcQ",
+              "dash_manifest_url": "https://manifest.googlevideo.com/video.mpd",
+              "source_heights": [1080],
+              "formats": [],
+          },
+      },
+  )
+
+  assert response.status_code == 200
+  assert [item["height"] for item in response.get_json()["formats"]] == [1080]
+
+
+def test_music_without_language_uses_a_complete_muxed_format_when_no_dash_exists(monkeypatch):
+  page_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+  extractor_formats = [
+      {
+          "format_id": f"muxed-{height}",
+          "url": f"https://rr1---sn.googlevideo.com/muxed/{height}",
+          "height": height,
+          "vcodec": "avc1",
+          "acodec": "mp4a",
+          "ext": "mp4",
+      }
+      for height in (1080, 720, 480, 360, 240)
+  ] + [
+      {
+          "format_id": "audio-low",
+          "url": "https://rr1---sn.googlevideo.com/audio-low",
+          "vcodec": "none",
+          "acodec": "opus",
+      },
+      {
+          "format_id": "audio-high",
+          "url": "https://rr1---sn.googlevideo.com/audio-high",
+          "vcodec": "none",
+          "acodec": "mp4a",
+      },
+  ]
+  monkeypatch.setattr(main, "_ensure_xdm_ready", lambda: None)
+  monkeypatch.setattr(main, "_extract_video_info", lambda *_args: {
+      "title": "Instrumental music",
+      "availability": "public",
+      "formats": extractor_formats,
+      "_xdm_companion_diagnostics": {"yt_dlp_authenticated": True, "flags": []},
+  })
+  sent = []
+
+  class XdmResponse:
+    status_code = 200
+
+  monkeypatch.setattr(
+      main.xdm_http,
+      "post",
+      lambda url, json, timeout: sent.append((url, json)) or XdmResponse(),
+  )
+  response = main.app.test_client().post(
+      "/formats",
+      headers={"Origin": "chrome-extension://" + "e" * 32},
+      json={
+          "url": page_url,
+          "user_agent": "Test browser",
+          "cookies": [],
+          "youtube_playback": {
+              "video_id": "dQw4w9WgXcQ",
+              "audio_streams_present": True,
+              "source_heights": [1080, 720, 480, 360, 240],
+              "formats": [{
+                  "itag": 137,
+                  "url": "https://rr1---sn.googlevideo.com/video-only/1080",
+                  "mime_type": 'video/mp4; codecs="avc1.640028"',
+                  "height": 1080,
+              }],
+          },
+      },
+  )
+
+  assert response.status_code == 200
+  body = response.get_json()
+  assert [item["height"] for item in body["formats"]] == [1080, 720, 480, 360]
+  assert body["audio_track"] is None
+  selected = main.app.test_client().post(
+      "/select",
+      json={"session": body["session"], "format_id": body["formats"][0]["format_id"]},
+      headers={"Origin": "chrome-extension://" + "e" * 32},
+  )
+
+  assert selected.status_code == 200
+  assert sent[0][0] == f"{main.XDM_BASE_URL}/download"
+  assert sent[0][1]["url"] == "https://rr1---sn.googlevideo.com/muxed/1080"
+  assert sent[0][1]["mimeType"] == "video/mp4"
+
+
+def test_prepare_media_forwards_inferred_language_less_music_track(monkeypatch):
+  manifest = b'''<MPD><Period>
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <Representation id="v" height="1080" />
+    </AdaptationSet>
+    <AdaptationSet id="music" contentType="audio" mimeType="audio/mp4">
+      <Representation id="a" audioSamplingRate="48000" />
+    </AdaptationSet>
+  </Period></MPD>'''
+  monkeypatch.setattr(
+      youtube_provider,
+      "_read_youtube_manifest",
+      lambda *_args: (manifest, "https://manifest.googlevideo.com/video.mpd"),
+  )
+  media = {
+      "url": "https://manifest.googlevideo.com/video.mpd",
+      "source_manifest_url": "https://manifest.googlevideo.com/video.mpd",
+      "protocol": "http_dash_segments",
+      "mime_type": "application/dash+xml",
+      "headers": {},
+      "cookie": "",
+      "audio_language": "",
+      "audio_track_is_original": True,
+      "audio_track_inferred": True,
+  }
+
+  prepared = youtube_provider.prepare_media_for_handoff(media)
+
+  assert prepared["url"].startswith("http://127.0.0.1:21121/manifest/")
+  assert prepared["source_manifest_url"] == "https://manifest.googlevideo.com/video.mpd"
