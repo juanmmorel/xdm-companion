@@ -13,7 +13,6 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urljoin, urlparse
 
 import requests
-import yt_dlp
 from flask import Flask, jsonify, make_response, request
 from errors import CompanionError
 from media_utils import (
@@ -27,6 +26,22 @@ from site_catalog import load_site_catalog, provider_for_url, site_domains
 
 
 app = Flask(__name__)
+
+
+class _LazyYtDlp:
+  """Load yt-dlp only when a media extraction request needs it."""
+
+  _module = None
+
+  def __getattr__(self, name):
+    module = self._module
+    if module is None:
+      import yt_dlp as module
+      self._module = module
+    return getattr(module, name)
+
+
+yt_dlp = _LazyYtDlp()
 xdm_http = requests.Session()
 xdm_http.trust_env = False
 

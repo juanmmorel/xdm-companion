@@ -1221,6 +1221,29 @@ def test_dash_preflight_hides_protected_heights_and_reuses_the_filtered_manifest
   )
 
 
+def test_manifest_proxy_cache_stores_bodies_on_disk_and_keeps_count_limit(monkeypatch, tmp_path):
+  monkeypatch.setattr(youtube_provider, "MAX_MANIFEST_PROXIES", 1)
+  monkeypatch.setattr(youtube_provider, "_manifest_proxy_cache_dir", tmp_path)
+  with youtube_provider._manifest_proxies_lock:
+    for token in list(youtube_provider._manifest_proxies):
+      youtube_provider._discard_manifest_proxy_locked(token)
+
+  first_url = youtube_provider._store_manifest_proxy(b"first manifest")
+  first_token = first_url.rsplit("/", 1)[1].removesuffix(".mpd")
+  first_path = tmp_path / f"{first_token}.mpd"
+  assert first_path.exists()
+  assert "body" not in youtube_provider._manifest_proxies[first_token]
+
+  second_url = youtube_provider._store_manifest_proxy(b"second manifest")
+  second_token = second_url.rsplit("/", 1)[1].removesuffix(".mpd")
+
+  assert not first_path.exists()
+  assert youtube_provider.get_manifest_proxy(first_token) is None
+  assert youtube_provider.get_manifest_proxy(second_token)["body"] == b"second manifest"
+  with youtube_provider._manifest_proxies_lock:
+    youtube_provider._discard_manifest_proxy_locked(second_token)
+
+
 def test_player_dash_manifest_adds_high_tier_without_direct_format_url(monkeypatch):
   page_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
   playback = {

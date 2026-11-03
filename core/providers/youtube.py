@@ -1,6 +1,7 @@
 """YouTube site adapter for player metadata, authenticated extraction, and DASH audio."""
 
 import re
+import tempfile
 import threading
 import time
 import uuid
@@ -31,6 +32,8 @@ MAX_URL_LENGTH = int(BACKEND_CONFIG.get("max_page_url_length", 8192))
 MAX_MANIFEST_BYTES = int(BACKEND_CONFIG.get("manifest_max_bytes", 4194304))
 MANIFEST_PROXY_TTL_SECONDS = int(BACKEND_CONFIG.get("manifest_proxy_ttl_seconds", 21600))
 MAX_MANIFEST_PROXIES = int(BACKEND_CONFIG.get("manifest_proxy_limit", 64))
+_manifest_proxy_tempdir = tempfile.TemporaryDirectory(prefix="xdm-companion-manifests-")
+_manifest_proxy_cache_dir = Path(_manifest_proxy_tempdir.name)
 _manifest_proxies = {}
 _manifest_proxies_lock = threading.Lock()
 
@@ -1028,23 +1031,42 @@ def _register_manifest_proxy(
 def _store_manifest_proxy(filtered_body):
   token = uuid.uuid4().hex
   now = time.time()
+  manifest_path = _manifest_proxy_cache_dir / f"{token}.mpd"
+  try:
+    with manifest_path.open("xb") as manifest_file:
+      manifest_file.write(filtered_body)
+  except OSError as error:
+    raise CompanionError(
+        f"No se pudo guardar temporalmente el manifiesto de {display_name()}."
+    ) from error
+
   with _manifest_proxies_lock:
     expired = [
         key for key, value in _manifest_proxies.items()
         if value["expires_at"] <= now
     ]
     for key in expired:
-      _manifest_proxies.pop(key, None)
-    if len(_manifest_proxies) >= MAX_MANIFEST_PROXIES:
+      _discard_manifest_proxy_locked(key)
+    while len(_manifest_proxies) >= MAX_MANIFEST_PROXIES and _manifest_proxies:
       oldest = min(_manifest_proxies, key=lambda key: _manifest_proxies[key]["created_at"])
-      _manifest_proxies.pop(oldest, None)
+      _discard_manifest_proxy_locked(oldest)
     _manifest_proxies[token] = {
         "created_at": now,
         "expires_at": now + MANIFEST_PROXY_TTL_SECONDS,
-        "body": filtered_body,
+        "path": manifest_path,
     }
   service_url = SITE_CATALOG.get("companion", {}).get("service_url", "http://127.0.0.1:21121")
   return f"{service_url}/manifest/{token}.mpd"
+
+
+def _discard_manifest_proxy_locked(token):
+  proxy = _manifest_proxies.pop(token, None)
+  if not proxy:
+    return
+  try:
+    Path(proxy["path"]).unlink(missing_ok=True)
+  except OSError:
+    pass
 
 def _dash_video_heights(manifest_body):
   root = ET.fromstring(manifest_body)
@@ -1282,14 +1304,25 @@ def _preflight_dash_options(available):
 
 
 def get_manifest_proxy(token, now=None):
-  """Return a live, one-time in-memory DASH manifest proxy entry."""
+  """Return a live DASH manifest proxy entry, loading its body from disk."""
   now = time.time() if now is None else now
   with _manifest_proxies_lock:
     proxy = _manifest_proxies.get(token)
     if proxy and proxy["expires_at"] <= now:
-      _manifest_proxies.pop(token, None)
+      _discard_manifest_proxy_locked(token)
       return None
-    return proxy
+    if not proxy:
+      return None
+    try:
+      body = Path(proxy["path"]).read_bytes()
+    except OSError:
+      _discard_manifest_proxy_locked(token)
+      return None
+    return {
+        "created_at": proxy["created_at"],
+        "expires_at": proxy["expires_at"],
+        "body": body,
+    }
 
 
 def original_audio_track(info, audio_track=None):
