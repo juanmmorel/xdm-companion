@@ -377,7 +377,12 @@ try {
   New-Item -ItemType Directory -Path $sourceDir -Force | Out-Null
   Test-SafeZip $archivePath $sourceDir
   Expand-Archive -LiteralPath $archivePath -DestinationPath $sourceDir -Force
-  foreach ($required in @("installer\install.py", "core\domains.json", "requirements.txt")) {
+  foreach ($required in @(
+      "installer\install.py",
+      "core\domains.json",
+      "core\ytdlp_worker.py",
+      "requirements.txt"
+    )) {
     if (-not (Test-Path -LiteralPath (Join-Path $sourceDir $required) -PathType Leaf)) {
       throw "El paquete está incompleto; falta $required."
     }

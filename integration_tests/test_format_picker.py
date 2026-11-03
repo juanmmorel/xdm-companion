@@ -4,11 +4,28 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../core")))
 
 import main
 import providers.youtube as youtube_provider
+import ytdlp_worker
+
+
+@pytest.fixture(autouse=True)
+def run_extractor_worker_in_process_for_unit_tests(monkeypatch):
+  def invoke(command):
+    result = ytdlp_worker.execute_request(command, ytdlp_module=main.yt_dlp)
+    if result.get("ok") is not True:
+      raise ytdlp_worker.YtdlpWorkerError(
+          result.get("error"),
+          authenticated=result.get("authenticated"),
+          flags=result.get("flags") or (),
+      )
+    return result
+
+  monkeypatch.setattr(main, "invoke_extractor_worker", invoke)
 
 
 def test_youtube_lists_high_resolution_direct_video_streams_and_labels_missing_audio():
@@ -473,7 +490,7 @@ def test_membership_error_identifies_when_ytdlp_requires_playback_validation():
 
 
 def test_ytdlp_log_collector_records_only_safe_diagnostic_categories():
-  collector = main._YtDlpLogCollector(youtube_provider)
+  collector = ytdlp_worker._LogCollector(youtube_provider)
   collector.warning("web client https formats require a GVS PO Token which was not provided")
   collector.warning("Some formats have been skipped as they are DRM protected")
 

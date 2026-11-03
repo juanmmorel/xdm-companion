@@ -6,10 +6,26 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../c
 
 import main
 from errors import CompanionError
+import ytdlp_worker
 
 
 PLAYLIST_URL = "https://www.youtube.com/playlist?list=PLexample"
 ORIGIN = "chrome-extension://" + "a" * 32
+
+
+@pytest.fixture(autouse=True)
+def run_extractor_worker_in_process_for_unit_tests(monkeypatch):
+  def invoke(command):
+    result = ytdlp_worker.execute_request(command, ytdlp_module=main.yt_dlp)
+    if result.get("ok") is not True:
+      raise ytdlp_worker.YtdlpWorkerError(
+          result.get("error"),
+          authenticated=result.get("authenticated"),
+          flags=result.get("flags") or (),
+      )
+    return result
+
+  monkeypatch.setattr(main, "invoke_extractor_worker", invoke)
 
 
 def test_playlist_enumeration_uses_flat_entries_and_preserves_order(monkeypatch):
@@ -114,6 +130,7 @@ def test_playlist_job_enqueues_individual_videos_in_order_with_numbered_names(mo
       "issues": [],
       "created_at": 10,
       "finished_at": None,
+      "_entries": [],
   }
   with main._playlist_jobs_lock:
     main._playlist_jobs[job_id] = job
@@ -164,6 +181,7 @@ def test_playlist_job_enqueues_individual_videos_in_order_with_numbered_names(mo
     assert job["failed"] == 0
     assert job["processed"] == 3
     assert job["issues"][0]["position"] == 2
+    assert "_entries" not in job
   finally:
     with main._playlist_jobs_lock:
       main._playlist_jobs.pop(job_id, None)
@@ -288,6 +306,7 @@ def test_playlist_queue_accepts_only_supported_limits_and_preserves_order(monkey
     assert target is main._process_playlist_entries
     selected = args[2]
     assert len(selected) == limit
+    assert "_entries" not in job, "discard the full preview after handing selected entries to the worker"
     assert [entry["position"] for entry in selected] == [
         position for position in range(1, len(entries) + 1) if position != 5
     ][:limit]
