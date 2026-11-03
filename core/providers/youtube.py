@@ -1524,6 +1524,11 @@ def resolve_format_options(
       payload.get(browser_key), page_url, audio_track, cookies,
   )
   _attach_manifest_backed_formats(browser_info)
+  if isinstance(payload, dict) and browser_key:
+    # The normalized player data above is sufficient from this point onward.
+    # Drop the raw browser payload before a possible yt-dlp extraction so the
+    # request does not retain a second copy of every format and URL.
+    payload.pop(browser_key, None)
   available = available_formats(
       browser_info, page_url, cookies, user_agent, audio_track, accept_language,
   ) if browser_info else []
