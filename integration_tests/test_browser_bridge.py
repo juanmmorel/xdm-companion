@@ -426,6 +426,25 @@ def test_systemd_user_service_is_enabled_for_the_next_login_without_a_bus(
   assert link_path.resolve() == service_path.resolve()
 
 
+def test_linux_service_unit_sets_a_soft_300m_memory_threshold_on_cgroup_v2():
+  unit = install.linux_systemd_user_service_content(
+      "/home/user/venv/bin/python", "/home/user/companion/main.py", cgroup_v2=True,
+  )
+
+  assert "MemoryHigh=300M" in unit
+  assert "MemoryMax=" not in unit
+  assert "Restart=always" in unit
+
+
+def test_linux_service_unit_keeps_compatibility_without_cgroup_v2():
+  unit = install.linux_systemd_user_service_content(
+      "/home/user/venv/bin/python", "/home/user/companion/main.py", cgroup_v2=False,
+  )
+
+  assert "MemoryHigh=" not in unit
+  assert "ExecStart=/home/user/venv/bin/python /home/user/companion/main.py" in unit
+
+
 def test_systemd_user_service_uses_recovered_session_environment(tmp_path, monkeypatch):
   service_dir = tmp_path / ".config/systemd/user"
   service_dir.mkdir(parents=True)

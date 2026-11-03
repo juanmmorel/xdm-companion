@@ -86,6 +86,7 @@ jobs:
               "installer/install.py",
               "installer/uninstall.py",
               "core/domains.json",
+              "core/ytdlp_worker.py",
               "requirements.txt",
               "browser-bridge/manifest.json",
               "browser-bridge/site-config.js",

@@ -26,6 +26,7 @@ from media_utils import (
 )
 from providers.registry import adapter_for_url, get_manifest_proxy, provider_config_for_url
 from site_catalog import load_site_catalog, provider_for_url, site_domains
+from ytdlp_worker import YtdlpWorkerError, invoke_extractor_worker, yt_dlp
 
 
 app = Flask(__name__)
@@ -60,20 +61,6 @@ def _read_request_payload():
   return request.get_json(silent=True, cache=False)
 
 
-class _LazyYtDlp:
-  """Load yt-dlp only when a media extraction request needs it."""
-
-  _module = None
-
-  def __getattr__(self, name):
-    module = self._module
-    if module is None:
-      import yt_dlp as module
-      self._module = module
-    return getattr(module, name)
-
-
-yt_dlp = _LazyYtDlp()
 xdm_http = requests.Session()
 xdm_http.trust_env = False
 
@@ -169,36 +156,9 @@ PLAYLIST_PREVIEW_TTL_SECONDS = 15 * 60
 _playlist_jobs = {}
 _playlist_jobs_lock = threading.Lock()
 _active_playlist_urls = {}
-YTDLP_MEMORY_TRIM_INTERVAL = 10
+YTDLP_MEMORY_TRIM_INTERVAL = 1
 
 
-
-
-class _YtDlpLogCollector:
-  """Collect only diagnostic categories; never persist yt-dlp's raw messages."""
-
-  def __init__(self, adapter=None):
-    self.adapter = adapter
-    self.flags = set()
-
-  def _record(self, message):
-    classify = getattr(self.adapter, "classify_extractor_log", None)
-    if classify:
-      self.flags.update(classify(message))
-    elif "javascript runtime" in str(message).lower():
-      self.flags.add("javascript_runtime_missing")
-
-  def debug(self, message):
-    self._record(message)
-
-  def info(self, _message):
-    pass
-
-  def warning(self, message):
-    self._record(message)
-
-  def error(self, message):
-    self._record(message)
 
 
 def is_complex_url(url):
@@ -380,8 +340,6 @@ def _extract_video_info(page_url, cookies, user_agent, audio_track=None, accept_
       "http_headers": headers,
       "js_runtimes": _js_runtimes(),
   }
-  log_collector = _YtDlpLogCollector(adapter)
-  options["logger"] = log_collector
   extractor_key = adapter.extractor_key() if adapter else ""
   extractor_args = adapter.extractor_args() if adapter else {}
   if extractor_args:
@@ -391,15 +349,24 @@ def _extract_video_info(page_url, cookies, user_agent, audio_track=None, accept_
     options["cookiefile"] = cookie_file
 
   yt_dlp_authenticated = None
+  extractor_flags = set()
   try:
     with _ytdlp_extraction_slots:
-      with yt_dlp.YoutubeDL(options) as downloader:
-        if extractor_key and adapter.checks_authenticated_session():
-          extractor = downloader.get_info_extractor(extractor_key)
-          extractor.initialize()
-          yt_dlp_authenticated = bool(extractor.is_authenticated)
-        info = downloader.extract_info(page_url, download=False)
+      result = invoke_extractor_worker({
+          "operation": "video",
+          "url": page_url,
+          "options": options,
+          "extractor_key": extractor_key,
+          "check_authenticated_session": bool(
+              extractor_key and adapter and adapter.checks_authenticated_session()
+          ),
+      })
+      info = result["info"]
+      yt_dlp_authenticated = result.get("authenticated")
+      extractor_flags = set(result.get("flags") or [])
   except Exception as error:
+    yt_dlp_authenticated = getattr(error, "authenticated", yt_dlp_authenticated)
+    extractor_flags.update(getattr(error, "flags", ()))
     error_message = str(error).lower()
     if "javascript runtime" in error_message or "yt-dlp-ejs" in error_message:
       if adapter:
@@ -415,11 +382,11 @@ def _extract_video_info(page_url, cookies, user_agent, audio_track=None, accept_
           provider_name,
           yt_dlp_authenticated,
           adapter.has_account_cookies(cookies),
-          "po_token_required" in log_collector.flags,
-          "drm_formats_filtered" in log_collector.flags,
+          "po_token_required" in extractor_flags,
+          "drm_formats_filtered" in extractor_flags,
       )
       friendly_error = adapter.extraction_error(
-          error, cookies, yt_dlp_authenticated, log_collector.flags,
+          error, cookies, yt_dlp_authenticated, extractor_flags,
       )
       if friendly_error:
         raise CompanionError(friendly_error) from error
@@ -440,7 +407,7 @@ def _extract_video_info(page_url, cookies, user_agent, audio_track=None, accept_
     raise CompanionError("Abre un video individual; no se aceptan listas completas.")
   if adapter:
     info["_xdm_companion_diagnostics"] = adapter.extraction_diagnostics(
-        yt_dlp_authenticated, log_collector.flags,
+        yt_dlp_authenticated, extractor_flags,
     )
   return info
 
@@ -539,8 +506,6 @@ def _extract_playlist_entries(page_url, cookies, user_agent, accept_language="")
       "http_headers": headers,
       "js_runtimes": _js_runtimes(),
   }
-  log_collector = _YtDlpLogCollector(adapter)
-  options["logger"] = log_collector
   extractor_key = adapter.extractor_key() if adapter else ""
   extractor_args = adapter.extractor_args() if adapter else {}
   if extractor_args:
@@ -551,40 +516,46 @@ def _extract_playlist_entries(page_url, cookies, user_agent, accept_language="")
 
   try:
     with _ytdlp_extraction_slots:
-      with yt_dlp.YoutubeDL(options) as downloader:
-        info = downloader.extract_info(page_url, download=False)
-        if not isinstance(info, dict) or info.get("_type") not in {"playlist", "multi_video"}:
-          raise CompanionError("El enlace no corresponde a una lista compatible.")
-        declared_count = info.get("playlist_count")
-        try:
-          if declared_count is not None and int(declared_count) > max_items:
-            raise CompanionError(
-                f"La lista supera el límite configurado de {max_items} videos; no se inició ninguna descarga."
-            )
-        except (TypeError, ValueError):
-          pass
+      result = invoke_extractor_worker({
+          "operation": "playlist",
+          "url": page_url,
+          "options": options,
+          "extractor_key": extractor_key,
+          "max_items": max_items,
+      })
+      info = result["info"]
+      if not isinstance(info, dict) or info.get("_type") not in {"playlist", "multi_video"}:
+        raise CompanionError("El enlace no corresponde a una lista compatible.")
+      declared_count = info.get("playlist_count")
+      try:
+        if declared_count is not None and int(declared_count) > max_items:
+          raise CompanionError(
+              f"La lista supera el límite configurado de {max_items} videos; no se inició ninguna descarga."
+          )
+      except (TypeError, ValueError):
+        pass
 
-        raw_entries = info.get("entries")
-        if raw_entries is None:
-          raise CompanionError("El sitio no devolvió los videos de la lista.")
-        entries = []
-        for position, entry in enumerate(raw_entries, start=1):
-          if position > max_items:
-            raise CompanionError(
-                f"La lista supera el límite configurado de {max_items} videos; no se inició ninguna descarga."
-            )
-          item_url = _playlist_entry_url(entry, page_url, provider)
-          entries.append({
-              "position": position,
-              "url": item_url,
-              "title": str((entry or {}).get("title") or "").strip()[:500],
-          })
-        if not entries:
-          raise CompanionError("La lista no contiene videos disponibles para procesar.")
-        return {
-            "title": str(info.get("title") or "Lista de reproducción").strip()[:500],
-            "entries": entries,
-        }
+      raw_entries = info.get("entries")
+      if raw_entries is None:
+        raise CompanionError("El sitio no devolvió los videos de la lista.")
+      entries = []
+      for position, entry in enumerate(raw_entries, start=1):
+        if position > max_items:
+          raise CompanionError(
+              f"La lista supera el límite configurado de {max_items} videos; no se inició ninguna descarga."
+          )
+        item_url = _playlist_entry_url(entry, page_url, provider)
+        entries.append({
+            "position": position,
+            "url": item_url,
+            "title": str((entry or {}).get("title") or "").strip()[:500],
+        })
+      if not entries:
+        raise CompanionError("La lista no contiene videos disponibles para procesar.")
+      return {
+          "title": str(info.get("title") or "Lista de reproducción").strip()[:500],
+          "entries": entries,
+      }
   except CompanionError:
     raise
   except Exception as error:
@@ -594,7 +565,9 @@ def _extract_playlist_entries(page_url, cookies, user_agent, accept_language="")
         raise CompanionError(adapter.runtime_requirement_message()) from error
       raise CompanionError("Instala un runtime de JavaScript compatible y vuelve a intentarlo.") from error
     if adapter:
-      friendly_error = adapter.extraction_error(error, cookies, None, log_collector.flags)
+      friendly_error = adapter.extraction_error(
+          error, cookies, getattr(error, "authenticated", None), getattr(error, "flags", ()),
+      )
       if friendly_error:
         raise CompanionError(friendly_error) from error
     raise CompanionError("No se pudo leer la lista. Comprueba el enlace y el acceso desde el navegador.") from error
@@ -1143,6 +1116,8 @@ def _preview_playlist_job(job_id, page_url, cookies, user_agent, accept_language
     job = _playlist_jobs.get(job_id)
   if not job:
     return
+  playlist = None
+  entries = None
   try:
     playlist = _extract_playlist_entries(page_url, cookies, user_agent, accept_language)
     entries = playlist["entries"]
@@ -1171,6 +1146,8 @@ def _preview_playlist_job(job_id, page_url, cookies, user_agent, accept_language
       _active_playlist_urls.pop(page_url, None)
     return
   finally:
+    playlist = None
+    entries = None
     _trim_unused_memory()
 
 def _process_playlist_entries(job_id, page_url, entries, cookies, user_agent, accept_language):
@@ -1283,6 +1260,7 @@ def _process_playlist_entries(job_id, page_url, entries, cookies, user_agent, ac
 
   with _playlist_jobs_lock:
     job["status"] = "completed_with_issues" if job["skipped"] or job["failed"] else "completed"
+    job.pop("_entries", None)
     job["current_position"] = None
     job["current_title"] = ""
     job["message"] = "Lista enviada a XDM." if job["status"] == "completed" else "Lista procesada con videos omitidos o fallidos."
@@ -1297,6 +1275,8 @@ def _process_playlist_job(job_id, page_url, cookies, user_agent, accept_language
     job = _playlist_jobs.get(job_id)
   if not job:
     return
+  playlist = None
+  entries = None
   try:
     playlist = _extract_playlist_entries(page_url, cookies, user_agent, accept_language)
     entries = playlist["entries"]
@@ -1319,6 +1299,8 @@ def _process_playlist_job(job_id, page_url, cookies, user_agent, accept_language
       job["finished_at"] = time.time()
       _active_playlist_urls.pop(page_url, None)
   finally:
+    playlist = None
+    entries = None
     _trim_unused_memory()
 
 
@@ -1710,6 +1692,8 @@ def queue_playlist():
       job["selection_limit"] = None
       job["total"] = len(job.get("_entries") or [])
     return jsonify({"status": "error", "message": job["message"]}), 503
+  with _playlist_jobs_lock:
+    job.pop("_entries", None)
   return jsonify({"status": "accepted", "job": snapshot})
 
 

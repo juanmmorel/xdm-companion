@@ -367,7 +367,12 @@ import tarfile
 
 archive_path = pathlib.Path(sys.argv[1])
 with tarfile.open(archive_path, "r:gz") as archive:
-  required = {"installer/install.py", "core/domains.json", "requirements.txt"}
+  required = {
+    "installer/install.py",
+    "core/domains.json",
+    "core/ytdlp_worker.py",
+    "requirements.txt",
+  }
   found = set()
   for member in archive.getmembers():
     path = pathlib.PurePosixPath(member.name)

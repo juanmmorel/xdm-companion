@@ -222,6 +222,26 @@ def configure_systemd_user_service(service_path):
   return True
 
 
+def linux_systemd_user_service_content(python_env, main_script_target, *, cgroup_v2=None):
+  """Build the Linux unit with a soft memory-pressure threshold where supported."""
+  if cgroup_v2 is None:
+    cgroup_v2 = os.path.isfile("/sys/fs/cgroup/cgroup.controllers")
+  memory_limit = "MemoryHigh=300M\n" if cgroup_v2 else ""
+  return f"""[Unit]
+Description=XDM Companion Service (Direct Python)
+After=network.target graphical-session.target
+
+[Service]
+Type=simple
+ExecStart={python_env} {main_script_target}
+Restart=always
+RestartSec=3
+{memory_limit}
+[Install]
+WantedBy=default.target
+"""
+
+
 def get_supported_js_runtime():
   for executable, minimum_major, minimum_minor in (("deno", 2, 3), ("node", 22, 0)):
     runtime_path = shutil.which(executable)
@@ -507,19 +527,7 @@ def main():
     service_path = os.path.join(service_dir, "xdm-companion.service")
 
     # Systemd ejecutará directamente python apuntando al main.py dentro del venv de XDM
-    service_content = f"""[Unit]
-Description=XDM Companion Service (Direct Python)
-After=network.target graphical-session.target
-
-[Service]
-Type=simple
-ExecStart={python_env} {main_script_target}
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=default.target
-"""
+    service_content = linux_systemd_user_service_content(python_env, main_script_target)
     with open(service_path, "w", encoding="utf-8") as f:
       f.write(service_content)
 
