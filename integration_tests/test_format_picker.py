@@ -1,5 +1,8 @@
 import os
 import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../core")))
@@ -1242,6 +1245,45 @@ def test_manifest_proxy_cache_stores_bodies_on_disk_and_keeps_count_limit(monkey
   assert youtube_provider.get_manifest_proxy(second_token)["body"] == b"second manifest"
   with youtube_provider._manifest_proxies_lock:
     youtube_provider._discard_manifest_proxy_locked(second_token)
+
+
+def test_ytdlp_extractions_are_limited_to_one_at_a_time(monkeypatch):
+  activity_lock = threading.Lock()
+  active = 0
+  maximum_active = 0
+
+  class FakeYoutubeDL:
+    def __init__(self, _options):
+      pass
+
+    def __enter__(self):
+      nonlocal active, maximum_active
+      with activity_lock:
+        active += 1
+        maximum_active = max(maximum_active, active)
+      time.sleep(0.02)
+      return self
+
+    def __exit__(self, *_args):
+      nonlocal active
+      with activity_lock:
+        active -= 1
+
+    def extract_info(self, page_url, download=False):
+      assert download is False
+      return {"id": page_url.rsplit("/", 1)[-1], "title": "Test", "formats": []}
+
+  monkeypatch.setattr(main.yt_dlp, "YoutubeDL", FakeYoutubeDL)
+  with ThreadPoolExecutor(max_workers=4) as executor:
+    infos = list(executor.map(
+        lambda index: main._extract_video_info(
+            f"https://vimeo.com/{index}", [], "", "", "",
+        ),
+        range(4),
+    ))
+
+  assert len(infos) == 4
+  assert maximum_active == 1
 
 
 def test_player_dash_manifest_adds_high_tier_without_direct_format_url(monkeypatch):

@@ -49,6 +49,14 @@ CONFIG_DIR = Path.home() / ".xdman" / "companion"
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 DOMAINS_FILE = Path(__file__).resolve().with_name("domains.json")
 SITE_CATALOG = load_site_catalog(DOMAINS_FILE)
+try:
+  YTDLP_MAX_CONCURRENT_EXTRACTIONS = max(
+      1,
+      int((SITE_CATALOG.get("companion") or {}).get("max_concurrent_ytdlp_extractions", 1)),
+  )
+except (TypeError, ValueError):
+  YTDLP_MAX_CONCURRENT_EXTRACTIONS = 1
+_ytdlp_extraction_slots = threading.BoundedSemaphore(YTDLP_MAX_CONCURRENT_EXTRACTIONS)
 XDM_BASE_URL = "http://127.0.0.1:8597"
 XDM_TIMEOUT = (3, 10)
 MAX_COOKIE_LENGTH = 64_000
@@ -344,12 +352,13 @@ def _extract_video_info(page_url, cookies, user_agent, audio_track=None, accept_
 
   yt_dlp_authenticated = None
   try:
-    with yt_dlp.YoutubeDL(options) as downloader:
-      if extractor_key and adapter.checks_authenticated_session():
-        extractor = downloader.get_info_extractor(extractor_key)
-        extractor.initialize()
-        yt_dlp_authenticated = bool(extractor.is_authenticated)
-      info = downloader.extract_info(page_url, download=False)
+    with _ytdlp_extraction_slots:
+      with yt_dlp.YoutubeDL(options) as downloader:
+        if extractor_key and adapter.checks_authenticated_session():
+          extractor = downloader.get_info_extractor(extractor_key)
+          extractor.initialize()
+          yt_dlp_authenticated = bool(extractor.is_authenticated)
+        info = downloader.extract_info(page_url, download=False)
   except Exception as error:
     error_message = str(error).lower()
     if "javascript runtime" in error_message or "yt-dlp-ejs" in error_message:
@@ -500,40 +509,41 @@ def _extract_playlist_entries(page_url, cookies, user_agent, accept_language="")
     options["cookiefile"] = cookie_file
 
   try:
-    with yt_dlp.YoutubeDL(options) as downloader:
-      info = downloader.extract_info(page_url, download=False)
-      if not isinstance(info, dict) or info.get("_type") not in {"playlist", "multi_video"}:
-        raise CompanionError("El enlace no corresponde a una lista compatible.")
-      declared_count = info.get("playlist_count")
-      try:
-        if declared_count is not None and int(declared_count) > max_items:
-          raise CompanionError(
-              f"La lista supera el límite configurado de {max_items} videos; no se inició ninguna descarga."
-          )
-      except (TypeError, ValueError):
-        pass
+    with _ytdlp_extraction_slots:
+      with yt_dlp.YoutubeDL(options) as downloader:
+        info = downloader.extract_info(page_url, download=False)
+        if not isinstance(info, dict) or info.get("_type") not in {"playlist", "multi_video"}:
+          raise CompanionError("El enlace no corresponde a una lista compatible.")
+        declared_count = info.get("playlist_count")
+        try:
+          if declared_count is not None and int(declared_count) > max_items:
+            raise CompanionError(
+                f"La lista supera el límite configurado de {max_items} videos; no se inició ninguna descarga."
+            )
+        except (TypeError, ValueError):
+          pass
 
-      raw_entries = info.get("entries")
-      if raw_entries is None:
-        raise CompanionError("El sitio no devolvió los videos de la lista.")
-      entries = []
-      for position, entry in enumerate(raw_entries, start=1):
-        if position > max_items:
-          raise CompanionError(
-              f"La lista supera el límite configurado de {max_items} videos; no se inició ninguna descarga."
-          )
-        item_url = _playlist_entry_url(entry, page_url, provider)
-        entries.append({
-            "position": position,
-            "url": item_url,
-            "title": str((entry or {}).get("title") or "").strip()[:500],
-        })
-      if not entries:
-        raise CompanionError("La lista no contiene videos disponibles para procesar.")
-      return {
-          "title": str(info.get("title") or "Lista de reproducción").strip()[:500],
-          "entries": entries,
-      }
+        raw_entries = info.get("entries")
+        if raw_entries is None:
+          raise CompanionError("El sitio no devolvió los videos de la lista.")
+        entries = []
+        for position, entry in enumerate(raw_entries, start=1):
+          if position > max_items:
+            raise CompanionError(
+                f"La lista supera el límite configurado de {max_items} videos; no se inició ninguna descarga."
+            )
+          item_url = _playlist_entry_url(entry, page_url, provider)
+          entries.append({
+              "position": position,
+              "url": item_url,
+              "title": str((entry or {}).get("title") or "").strip()[:500],
+          })
+        if not entries:
+          raise CompanionError("La lista no contiene videos disponibles para procesar.")
+        return {
+            "title": str(info.get("title") or "Lista de reproducción").strip()[:500],
+            "entries": entries,
+        }
   except CompanionError:
     raise
   except Exception as error:

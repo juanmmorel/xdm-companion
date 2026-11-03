@@ -1,7 +1,8 @@
 {
   "companion": {
     "service_url": "http://127.0.0.1:21121",
-    "xdm_url": "http://127.0.0.1:8597"
+    "xdm_url": "http://127.0.0.1:8597",
+    "max_concurrent_ytdlp_extractions": 1
   },
   "providers": [
     {
