@@ -55,6 +55,11 @@ def _mark_extraction_for_memory_cleanup():
     g._xdm_ytdlp_extraction_used = True
 
 
+def _read_request_payload():
+  """Parse a one-use JSON request body without keeping a second cached copy."""
+  return request.get_json(silent=True, cache=False)
+
+
 class _LazyYtDlp:
   """Load yt-dlp only when a media extraction request needs it."""
 
@@ -1514,7 +1519,7 @@ def filtered_manifest(token):
 
 @app.post("/formats")
 def formats():
-  payload = request.get_json(silent=True)
+  payload = _read_request_payload()
   if not isinstance(payload, dict):
     return jsonify({"status": "error", "message": "Solicitud de video no válida."}), 400
   try:
@@ -1550,7 +1555,7 @@ def formats():
 
 @app.post("/playlist/start")
 def start_playlist():
-  payload = request.get_json(silent=True)
+  payload = _read_request_payload()
   if not isinstance(payload, dict):
     return jsonify({"status": "error", "message": "Solicitud de lista no válida."}), 400
   try:
@@ -1624,7 +1629,7 @@ def start_playlist():
 
 @app.post("/playlist/queue")
 def queue_playlist():
-  payload = request.get_json(silent=True)
+  payload = _read_request_payload()
   if not isinstance(payload, dict):
     return jsonify({"status": "error", "message": "Solicitud de lista no válida."}), 400
   try:
@@ -1710,7 +1715,7 @@ def queue_playlist():
 
 @app.post("/playlist/status")
 def playlist_status():
-  payload = request.get_json(silent=True)
+  payload = _read_request_payload()
   job_id = str((payload or {}).get("job_id") or "") if isinstance(payload, dict) else ""
   if not re.fullmatch(r"[0-9a-f]{32}", job_id):
     return jsonify({"status": "error", "message": "La sesión de lista no es válida."}), 400
@@ -1728,7 +1733,7 @@ def playlist_status():
 
 @app.post("/select")
 def select_format():
-  payload = request.get_json(silent=True)
+  payload = _read_request_payload()
   if not isinstance(payload, dict):
     return jsonify({"status": "error", "message": "Solicitud de resolución no válida."}), 400
   token = payload.get("session")
@@ -1758,7 +1763,7 @@ def select_format():
 
 @app.post("/intercept")
 def intercept():
-  payload = request.get_json(silent=True)
+  payload = _read_request_payload()
   if not isinstance(payload, dict):
     return jsonify({
         "status": "error",

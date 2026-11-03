@@ -27,3 +27,11 @@ def test_request_memory_cleanup_runs_only_after_extraction(monkeypatch):
   with main.app.test_request_context("/formats"):
     main.g._xdm_ytdlp_extraction_used = True
   assert calls == ["trim"]
+
+
+def test_request_payload_does_not_cache_player_json():
+  payload = {"url": "https://www.youtube.com/watch?v=abc123def45", "player": {"formats": [1, 2]}}
+  with main.app.test_request_context("/formats", method="POST", json=payload) as context:
+    assert main._read_request_payload() == payload
+    assert context.request._cached_json == (Ellipsis, Ellipsis)
+    assert not hasattr(context.request, "_cached_data")
