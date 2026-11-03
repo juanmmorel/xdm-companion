@@ -1,9 +1,12 @@
-import json
+import ctypes
+import gc
 import ipaddress
+import json
 import math
 import os
 import re
 import shutil
+import sys
 import threading
 import tempfile
 import time
@@ -13,7 +16,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urljoin, urlparse
 
 import requests
-from flask import Flask, jsonify, make_response, request
+from flask import Flask, g, has_request_context, jsonify, make_response, request
 from errors import CompanionError
 from media_utils import (
     _LANGUAGE_TAG_RE, _accept_language_header, _cookie_domain_matches,
@@ -26,6 +29,30 @@ from site_catalog import load_site_catalog, provider_for_url, site_domains
 
 
 app = Flask(__name__)
+
+
+try:
+  _malloc_trim = ctypes.CDLL(None).malloc_trim if sys.platform.startswith("linux") else None
+  if _malloc_trim:
+    _malloc_trim.argtypes = [ctypes.c_size_t]
+    _malloc_trim.restype = ctypes.c_int
+except (AttributeError, OSError):
+  _malloc_trim = None
+
+
+def _trim_unused_memory():
+  """Collect temporary extractor objects and return free glibc pages when possible."""
+  gc.collect()
+  if _malloc_trim:
+    try:
+      _malloc_trim(0)
+    except (OSError, ValueError):
+      pass
+
+
+def _mark_extraction_for_memory_cleanup():
+  if has_request_context():
+    g._xdm_ytdlp_extraction_used = True
 
 
 class _LazyYtDlp:
@@ -117,6 +144,12 @@ def _set_browser_handoff_cors(response):
     response.headers["Vary"] = "Origin"
   return response
 
+
+@app.teardown_request
+def _release_request_extraction_memory(_error):
+  if getattr(g, "_xdm_ytdlp_extraction_used", False):
+    _trim_unused_memory()
+
 COMPLEX_DOMAINS = tuple(site_domains(SITE_CATALOG))
 
 _active_urls = set()
@@ -131,6 +164,7 @@ PLAYLIST_PREVIEW_TTL_SECONDS = 15 * 60
 _playlist_jobs = {}
 _playlist_jobs_lock = threading.Lock()
 _active_playlist_urls = {}
+YTDLP_MEMORY_TRIM_INTERVAL = 10
 
 
 
@@ -315,6 +349,7 @@ def _js_runtimes():
 
 
 def _extract_video_info(page_url, cookies, user_agent, audio_track=None, accept_language=""):
+  _mark_extraction_for_memory_cleanup()
   adapter = adapter_for_url(page_url, SITE_CATALOG)
   headers = {}
   if user_agent:
@@ -474,6 +509,7 @@ def _playlist_entry_url(entry, page_url, provider):
 
 
 def _extract_playlist_entries(page_url, cookies, user_agent, accept_language=""):
+  _mark_extraction_for_memory_cleanup()
   provider, playlist_config = _playlist_config(page_url)
   if not playlist_config:
     raise CompanionError("Este sitio no tiene habilitada la descarga de listas.")
@@ -1129,6 +1165,8 @@ def _preview_playlist_job(job_id, page_url, cookies, user_agent, accept_language
       job["finished_at"] = time.time()
       _active_playlist_urls.pop(page_url, None)
     return
+  finally:
+    _trim_unused_memory()
 
 def _process_playlist_entries(job_id, page_url, entries, cookies, user_agent, accept_language):
   with _playlist_jobs_lock:
@@ -1202,6 +1240,15 @@ def _process_playlist_entries(job_id, page_url, entries, cookies, user_agent, ac
         job["skipped"] += 1
         job["processed"] += 1
       continue
+    finally:
+      # Drop the full inventory per item; trim allocator pages in small batches.
+      _info = None
+      available = None
+      _inventory = None
+      _unused_media = None
+      selection = None
+      if position % YTDLP_MEMORY_TRIM_INTERVAL == 0 or position == len(entries):
+        _trim_unused_memory()
 
     numbered_title = f"{position:0{width}d} - {media.get('title') or title}"[:500]
     media["title"] = numbered_title
@@ -1236,6 +1283,7 @@ def _process_playlist_entries(job_id, page_url, entries, cookies, user_agent, ac
     job["message"] = "Lista enviada a XDM." if job["status"] == "completed" else "Lista procesada con videos omitidos o fallidos."
     job["finished_at"] = time.time()
     _active_playlist_urls.pop(page_url, None)
+  _trim_unused_memory()
 
 
 def _process_playlist_job(job_id, page_url, cookies, user_agent, accept_language):
@@ -1265,6 +1313,8 @@ def _process_playlist_job(job_id, page_url, cookies, user_agent, accept_language
       job["message"] = "No se pudo procesar la lista de reproducción."
       job["finished_at"] = time.time()
       _active_playlist_urls.pop(page_url, None)
+  finally:
+    _trim_unused_memory()
 
 
 
@@ -1337,6 +1387,7 @@ def _process_intercept_job(page_url, cookies, user_agent, browser_title, audio_t
   finally:
     with _active_urls_lock:
       _active_urls.discard(page_url)
+    _trim_unused_memory()
 
 
 def _start_intercept_job(
